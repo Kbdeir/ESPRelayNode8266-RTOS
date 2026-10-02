@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timer Configuration</title>
+<style>
+:root{--page:#edf1f5;--ink:#152033;--muted:#687589;--panel:#fff;--panel-2:#f8fafc;--line:#d9e1ea;--field:#fdfefe;--teal:#0f766e;--teal-dark:#0a5f59;--blue:#2563eb;--amber:#b7791f;--rose:#be123c;--green:#15803d;--slate:#475569;--shadow-sm:0 2px 8px rgba(21,32,51,.06);--shadow:0 18px 45px rgba(21,32,51,.12)}
+*{box-sizing:border-box}
+html{background:var(--page)}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.42;background:linear-gradient(180deg,#dfe9f3 0,#edf1f5 320px),var(--page)}
+.shell{width:min(860px,calc(100vw - 32px));margin:0 auto;padding:24px 0 36px}
+.topbar{position:relative;overflow:hidden;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:24px 26px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:linear-gradient(135deg,#152033,#103f49,#0f766e);box-shadow:var(--shadow)}
+.topbar h1{margin:0;font-size:28px;font-weight:700}
+.topbar .hint{margin-top:7px;color:#cfe0ea}
+.topbar .meta{min-width:200px;color:#e6eef5;font-size:13px;text-align:right;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:10px 12px}
+.status-badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.status-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);color:#e6eef5}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-sm);padding:18px;margin-top:16px}
+.card h2{position:relative;display:flex;align-items:center;gap:10px;margin:-2px 0 16px;padding-bottom:12px;color:var(--ink);border-bottom:1px solid var(--line);font-size:18px;font-weight:700}
+.card h2::before{content:"";width:10px;height:28px;border-radius:6px;background:var(--teal);flex:0 0 auto}
+.card:nth-of-type(2) h2::before{background:var(--blue)}
+.card:nth-of-type(3) h2::before{background:var(--amber)}
+.card:nth-of-type(4) h2::before{background:var(--rose)}
+.subhead{margin:20px 0 10px;padding:7px 10px;color:#334155;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;font-weight:700;font-size:12px;text-transform:uppercase}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}
+.form-grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+.field{display:flex;flex-direction:column;gap:6px}
+.field.full{grid-column:1/-1}
+label{color:var(--muted);font-size:12px;font-weight:700}
+input[type="text"],input[type="number"],input[type="date"],input[type="time"],select{min-height:38px;border:1px solid #bac7d5;border-radius:8px;background:var(--field);color:var(--ink);padding:8px 10px;font:inherit;transition:border-color 120ms ease,box-shadow 120ms ease}
+input:focus,select:focus{outline:none;border-color:var(--blue);background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.16)}
+input[type="checkbox"]{width:18px;height:18px;accent-color:var(--teal)}
+.check-row{min-height:38px;display:flex;align-items:center;gap:9px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.hint{color:var(--muted);font-size:12px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+button,input[type="submit"],input[type="button"]{min-height:38px;border:1px solid transparent;border-radius:8px;background:var(--teal);color:#fff;padding:8px 15px;font:inherit;font-weight:700;cursor:pointer;text-align:center;box-shadow:0 5px 14px rgba(15,118,110,.22);transition:transform 120ms ease,box-shadow 120ms ease,background-color 120ms ease}
+button:hover,input[type="submit"]:hover,input[type="button"]:hover{background:var(--teal-dark);box-shadow:0 7px 18px rgba(15,118,110,.28);transform:translateY(-1px)}
+.secondary{background:var(--slate)!important;box-shadow:0 5px 14px rgba(71,85,105,.18)!important}
+.notice{padding:20px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;color:var(--muted);text-align:center;margin-top:16px}
+.hidden-field{display:none}
+.hidden{display:none!important}
+#select-timer-card{background:#f0fdf4;border-color:#86efac}
+#select-timer-card h2{color:var(--green)}
+#select-timer-card h2::before{background:var(--green)}
+.type-desc{padding:10px 14px;background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:8px;color:var(--slate);font-size:13px;line-height:1.6}
+.field-error{border-color:var(--rose)!important;box-shadow:0 0 0 3px rgba(190,18,60,.15)!important;background:#fff5f7!important}
+.error-msg{display:none;color:var(--rose);font-size:12px;font-weight:700}
+.error-msg.visible{display:block}
+@media(max-width:720px){.topbar{grid-template-columns:1fr}.topbar .meta{min-width:0;text-align:left}.form-grid,.form-grid.four{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.form-grid,.form-grid.four{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div>
+      <h1>Timer Configuration</h1>
+      <div class="hint">Configure schedule timers for relay automation.</div>
+      <div class="status-badges">
+        <span class="status-badge">Timer: <strong id="tstate-badge">%TSTATE%</strong></span>
+        <span class="status-badge">Relay: <strong id="rstate-badge">%RSTATE%</strong></span>
+      </div>
+    </div>
+    <div class="meta">
+      <div>System time: %systemtime%</div>
+      <div>Uptime: %uptime%</div>
+      <div>Heap: <strong id="hb-free">—</strong> B | min: <strong id="hb-min">—</strong> B | blk: <strong id="hb-blk">—</strong> B</div>
+    </div>
+  </header>
+
+  <div class="card" id="select-timer-card">
+    <h2>Select Timer</h2>
+    <form method="get" action="Timer1" id="SelectorForm">
+      <div class="form-grid">
+        <div class="field">
+          <label for="Combobox1">Timer slot</label>
+          <select name="GetTimer" id="Combobox1">
+            <option value="">-- Choose a timer --</option>
+            <option value="1">Timer 1</option>
+            <option value="2">Timer 2</option>
+            <option value="3">Timer 3</option>
+            <option value="4">Timer 4</option>
+          </select>
+        </div>
+        <div class="field"><label>&nbsp;</label><input type="submit" name="Show" value="Load Timer"></div>
+      </div>
+    </form>
+  </div>
+
+  <div id="timer-form-wrapper">
+    <form method="get" action="savetimer.html" enctype="text/plain" id="Form1" onsubmit="return submitForm1()">
+
+      <input class="hidden-field" type="number" id="TNBT" name="TNBT" value="%TNBT%">
+      <input class="hidden-field" type="text" id="TMTYPEedit" name="TMTYPEedit" value="%TMTYPEedit%">
+
+      <div class="card">
+        <h2>Timer <span id="timer-heading-nb"></span></h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="TNB">Timer slot</label>
+            <select name="TNumber" id="TNB" onchange="syncTimerNumber(this)">
+              <option value="1">Timer 1</option>
+              <option value="2">Timer 2</option>
+              <option value="3">Timer 3</option>
+              <option value="4">Timer 4</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Enabled</label>
+            <div class="check-row"><input type="checkbox" id="CEnabled" name="CEnabled" value="%CEnabled%"><span>Enable this timer</span></div>
+          </div>
+          <div class="field">
+            <label for="TRelay_edt">Target relay</label>
+            <select id="TRelay_edt" name="TRelay">%TIMER_RELAY_OPTIONS%</select>
+            <span class="hint">Choose &ldquo;(none)&rdquo; to use this timer purely as a reusable schedule window &mdash; e.g. to gate an Automation Rule &mdash; without it switching any relay.</span>
+          </div>
+          <div class="field">
+            <label for="TMTYPE">Timer type</label>
+            <select id="TMTYPE" onchange="func_TMTYPE(this)">
+              <option value="1">Specific Date &amp; Time</option>
+              <option value="2">Recurring &mdash; Daily</option>
+              <option value="3">Recurring &mdash; Weekly</option>
+              <option value="4">Recurring &mdash; Monthly</option>
+            </select>
+          </div>
+          <div class="field full"><div class="type-desc" id="type-desc"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Schedule</h2>
+        <div class="subhead">Date bounds</div>
+        <p class="hint">Timer is active when today falls within this date range.</p>
+        <div class="form-grid">
+          <div class="field">
+            <label for="Editbox1">Start date</label>
+            <input type="date" id="Editbox1" name="Dfrom" value="%Dfrom%">
+            <span class="error-msg" id="err-dfrom"></span>
+          </div>
+          <div class="field">
+            <label for="TDate">End date</label>
+            <input type="date" id="TDate" name="DTo" value="%DTo%">
+            <span class="error-msg" id="err-dto">End date must be on or after start date</span>
+          </div>
+          <div class="field hidden" id="monthday-field">
+            <label for="MonthDay_edt">Day of month (1&ndash;31)</label>
+            <input type="number" id="MonthDay_edt" name="MonthDay" value="%MONTHDAY%" min="1" max="31">
+            <span class="hint">Relay fires on this day each month.</span>
+          </div>
+        </div>
+        <div class="subhead">Time bounds</div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="FTime">Start time</label>
+            <input type="time" id="FTime" name="TFrom" value="%TFrom%">
+            <span class="error-msg" id="err-ftime"></span>
+          </div>
+          <div class="field full hidden" id="stop-mode-row">
+            <label>Stop by</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <label class="check-row" style="cursor:pointer;gap:9px;"><input type="radio" name="stop-mode" value="time" onchange="onStopModeChange()"><span>End time</span></label>
+              <label class="check-row" style="cursor:pointer;gap:9px;"><input type="radio" name="stop-mode" value="duration" onchange="onStopModeChange()"><span>Duration</span></label>
+            </div>
+          </div>
+          <div class="field" id="end-time-field">
+            <label for="TTime">End time</label>
+            <input type="time" id="TTime" name="TTo" value="%TTo%">
+            <span class="error-msg" id="err-ttime">End time must be after start time</span>
+          </div>
+          <div class="field" id="hours-field">
+            <label for="Hours_edt">Duration &mdash; hours</label>
+            <input type="number" id="Hours_edt" name="Mark_Hours" value="%Mark_Hours%" min="0">
+          </div>
+          <div class="field" id="minutes-field">
+            <label for="Minutes_edt">Duration &mdash; minutes</label>
+            <input type="number" id="Minutes_edt" name="Mark_Minutes" value="%Mark_Minutes%" min="0" max="59">
+          </div>
+        </div>
+        <p class="hint" style="margin-top:8px">Specific date &amp; Daily: choose <strong>End time</strong> or <strong>Duration</strong> mode above. Weekly: duration only. Monthly: uses start&ndash;end time difference.</p>
+      </div>
+
+      <div class="card hidden" id="weekdays-card">
+        <h2>Weekdays</h2>
+        <p class="hint" style="margin-bottom:12px">Select which days this timer is active.</p>
+        <div class="form-grid four">
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CSunday"    name="CSunday"    value="%CSunday%">   <span>Sunday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CMonday"    name="CMonday"    value="%CMonday%">   <span>Monday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CTuesday"   name="CTuesday"   value="%CTuesday%">  <span>Tuesday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CWednesday" name="CWednesday" value="%CWednesday%"><span>Wednesday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CThursday"  name="CThursday"  value="%CThursday%"> <span>Thursday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CFriday"    name="CFriday"    value="%CFriday%">   <span>Friday</span></div></div>
+          <div class="field"><label>&nbsp;</label><div class="check-row"><input type="checkbox" id="CSaturday"  name="CSaturday"  value="%CSaturday%"> <span>Saturday</span></div></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <input type="submit" name="TimerSave" value="Save Timer">
+        <button type="button" class="secondary" onclick="window.location.href='/'">Config</button>
+        <button type="button" class="secondary" onclick="window.location.href='LiveReadings.html'">Live Readings</button>
+        <button type="button" class="secondary" onclick="window.location.href='Automation'">Automation</button>
+      </div>
+    </form>
+  </div>
+</main>
+<script>
+function syncTimerNumber(sel){
+  var t=document.getElementById("TNBT");if(t)t.value=sel.value;
+  var h=document.getElementById("timer-heading-nb");if(h)h.textContent=sel.value;
+}
+function hasDuration(){
+  var h=parseInt((document.getElementById("Hours_edt")||{}).value,10)||0;
+  var m=parseInt((document.getElementById("Minutes_edt")||{}).value,10)||0;
+  return(h+m)>0;
+}
+function onStopModeChange(){
+  var radDur=document.querySelector('input[name="stop-mode"][value="duration"]');
+  var isDur=radDur&&radDur.checked;
+  var ef=document.getElementById("end-time-field"),hf=document.getElementById("hours-field"),mf=document.getElementById("minutes-field");
+  if(ef)ef.classList.toggle("hidden",isDur);
+  if(hf)hf.classList.toggle("hidden",!isDur);
+  if(mf)mf.classList.toggle("hidden",!isDur);
+  if(!isDur){var h=document.getElementById("Hours_edt"),m=document.getElementById("Minutes_edt");if(h)h.value=0;if(m)m.value=0;}
+}
+function func_TMTYPE(sel){
+  var x=parseInt(sel.value,10);
+  var et=document.getElementById("TMTYPEedit");if(et)et.value=x;
+  var wc=document.getElementById("weekdays-card"),mf=document.getElementById("monthday-field"),smr=document.getElementById("stop-mode-row");
+  if(wc)wc.classList.toggle("hidden",x!==3);
+  if(mf)mf.classList.toggle("hidden",x!==4);
+  if(smr)smr.classList.remove("hidden");
+  var hasDur=hasDuration();
+  var rt=document.querySelector('input[name="stop-mode"][value="time"]');
+  var rd=document.querySelector('input[name="stop-mode"][value="duration"]');
+  if(rt)rt.checked=!hasDur;if(rd)rd.checked=hasDur;
+  onStopModeChange();
+  var desc=document.getElementById("type-desc");
+  if(desc){
+    var descs={
+      1:"Relay turns ON <strong>once</strong> &mdash; from the start date &amp; time until the end date &amp; time (<em>End time</em> mode), or for the set duration (<em>Duration</em> mode).",
+      2:"Relay turns ON <strong>every day</strong> at the start time until the end time or for the set duration, within the start&ndash;end date range.",
+      3:"Relay turns ON on the <strong>selected weekdays</strong> at the start time until the end time or for the set duration.",
+      4:"Relay turns ON on <strong>day [DD] of every month</strong>, from the start time until the end time or for the set duration, within the start&ndash;end date range.<br><br>&#9888; <strong>Short-month note:</strong> If day [DD] does not exist in a given month (e.g. day&nbsp;31 in April, or day&nbsp;29&ndash;31 in February), that month is <strong>skipped entirely</strong>. To avoid skipped months, choose a day between 1 and 28."
+    };
+    desc.innerHTML=descs[x]||"";
+  }
+}
+function setFieldError(inp,msgEl,hasErr){if(inp)inp.classList.toggle("field-error",hasErr);if(msgEl)msgEl.classList.toggle("visible",hasErr);}
+function validateDateRange(){
+  var from=document.getElementById("Editbox1"),to=document.getElementById("TDate"),errTo=document.getElementById("err-dto");
+  if(!from||!to||!from.value||!to.value){setFieldError(to,errTo,false);return true;}
+  var valid=to.value>=from.value;setFieldError(to,errTo,!valid);return valid;
+}
+function validateTimeRange(){
+  var radDur=document.querySelector('input[name="stop-mode"][value="duration"]');
+  if(radDur&&radDur.checked){setFieldError(document.getElementById("TTime"),document.getElementById("err-ttime"),false);return true;}
+  var from=document.getElementById("FTime"),to=document.getElementById("TTime"),errTo=document.getElementById("err-ttime");
+  if(!from||!to||!from.value||!to.value){setFieldError(to,errTo,false);return true;}
+  var valid=to.value>from.value;setFieldError(to,errTo,!valid);return valid;
+}
+function submitForm1(){
+  var dateOk=validateDateRange(),timeOk=validateTimeRange();
+  if(!dateOk)document.getElementById("TDate").focus();
+  else if(!timeOk)document.getElementById("TTime").focus();
+  return dateOk&&timeOk;
+}
+(function init(){
+  var tnbt=document.getElementById("TNBT"),tmtypeedit=document.getElementById("TMTYPEedit");
+  var tnb=document.getElementById("TNB"),tmtype=document.getElementById("TMTYPE");
+  var wrapper=document.getElementById("timer-form-wrapper"),cb=document.getElementById("Combobox1");
+  // Only show the timer editor when this page load resulted from picking a
+  // timer (Select Timer + Load Timer, or the post-save redirect) — both go
+  // through /Timer1?GetTimer=N. A bare /Timer1 open shows just "Select Timer".
+  var getTimer=parseInt(new URLSearchParams(window.location.search).get("GetTimer"),10);
+  var selected=!isNaN(getTimer)&&getTimer>0;
+  if(!selected){
+    if(wrapper)wrapper.classList.add("hidden");
+    ["tstate-badge","rstate-badge"].forEach(function(id){var el=document.getElementById(id);if(el&&el.textContent.indexOf("%")!==-1)el.textContent="—";});
+    return;
+  }
+  var timerNb=tnbt?parseInt(tnbt.value,10):NaN;
+  if(isNaN(timerNb)||timerNb<=0)timerNb=getTimer;
+  if(tnb)tnb.value=timerNb;
+  var heading=document.getElementById("timer-heading-nb");if(heading)heading.textContent=timerNb;
+  if(cb)cb.value=timerNb;
+  var typeVal=tmtypeedit?parseInt(tmtypeedit.value,10):1;
+  if(!isNaN(typeVal)&&tmtype)tmtype.value=typeVal;
+  if(tmtype)func_TMTYPE(tmtype);
+})();
+</script>
+<script>
+(function(){
+  function refreshRelayState(){
+    var sel=document.getElementById("TRelay_edt");if(!sel)return;
+    var relay=parseInt(sel.value,10);if(isNaN(relay))return;
+    var req=new XMLHttpRequest();req.open("GET","/RelayState.json?relay="+relay,true);
+    req.onreadystatechange=function(){
+      if(req.readyState!==4||req.status!==200)return;
+      var d;try{d=JSON.parse(req.responseText);}catch(e){return;}
+      var badge=document.getElementById("rstate-badge");if(badge)badge.textContent=d.state||"—";
+    };req.send();
+  }
+  document.addEventListener("DOMContentLoaded",function(){
+    var wrapper=document.getElementById("timer-form-wrapper");
+    if(wrapper&&!wrapper.classList.contains("hidden")&&wrapper.querySelector("form")){
+      refreshRelayState();setInterval(refreshRelayState,1000);
+      var sel=document.getElementById("TRelay_edt");if(sel)sel.addEventListener("change",refreshRelayState);
+    }
+  });
+})();
+</script>
+<script>
+(function(){function ph(){fetch('/api/heap').then(function(r){return r.json();}).then(function(d){var f=document.getElementById('hb-free'),m=document.getElementById('hb-min'),b=document.getElementById('hb-blk');if(f&&d.heap!=null)f.textContent=Number(d.heap).toLocaleString();if(m&&d.heapMin!=null)m.textContent=Number(d.heapMin).toLocaleString();if(b&&d.heapMaxBlk!=null)b.textContent=Number(d.heapMaxBlk).toLocaleString();}).catch(function(){});}ph();setInterval(ph,30000);}());
+</script>
+</body>
+</html>

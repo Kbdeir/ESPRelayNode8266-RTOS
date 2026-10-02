@@ -1,0 +1,3 @@
+COMPONENT_ADD_INCLUDEDIRS := include littlefs
+COMPONENT_SRCDIRS := . littlefs
+COMPONENT_REQUIRES := spi_flash

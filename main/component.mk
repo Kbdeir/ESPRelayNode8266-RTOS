@@ -1,0 +1,2 @@
+COMPONENT_SRCDIRS := .
+COMPONENT_ADD_INCLUDEDIRS := . ../components/sc_core/include ../components/sc_config/include ../components/sc_health/include ../components/sc_wifi/include ../components/sc_relay/include ../components/sc_mqtt/include ../components/sc_webfs/include ../components/sc_web/include ../components/sc_time/include ../components/sc_timer/include ../components/sc_sensors/include ../components/sc_modbus/include ../components/sc_ha/include ../components/sc_diag/include ../components/sc_ota/include

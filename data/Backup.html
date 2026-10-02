@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backup &amp; Restore</title>
+<style>
+:root{--page:#edf1f5;--ink:#152033;--muted:#687589;--panel:#fff;--panel-2:#f8fafc;--line:#d9e1ea;--field:#fdfefe;--teal:#0f766e;--teal-dark:#0a5f59;--blue:#2563eb;--amber:#b7791f;--amber-bg:#fffbeb;--amber-border:#fcd34d;--rose:#be123c;--green:#15803d;--slate:#475569;--shadow-sm:0 2px 8px rgba(21,32,51,.06);--shadow:0 18px 45px rgba(21,32,51,.12)}
+*{box-sizing:border-box}
+html{background:var(--page)}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.42;background:linear-gradient(180deg,#dfe9f3 0,#edf1f5 320px),var(--page)}
+.shell{width:min(860px,calc(100vw - 32px));margin:0 auto;padding:24px 0 36px}
+.topbar{position:relative;overflow:hidden;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:24px 26px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:linear-gradient(135deg,#152033,#103f49,#0f766e);box-shadow:var(--shadow)}
+.topbar h1{margin:0;font-size:28px;font-weight:700}
+.topbar .hint{margin-top:7px;color:#cfe0ea}
+.topbar .meta{min-width:230px;color:#e6eef5;font-size:13px;text-align:right;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:10px 12px}
+.back-link{color:#a8d8cf;font-size:13px;text-decoration:none;white-space:nowrap;margin-top:6px;display:inline-block}
+.back-link:hover{color:#fff}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-sm);padding:18px;margin-top:16px}
+.card h2{position:relative;display:flex;align-items:center;gap:10px;margin:-2px 0 16px;padding-bottom:12px;color:var(--ink);border-bottom:1px solid var(--line);font-size:18px;font-weight:700}
+.card h2::before{content:"";width:10px;height:28px;border-radius:6px;background:var(--teal);flex:0 0 auto}
+.card.danger h2::before{background:var(--rose)}
+.check-row{min-height:38px;display:flex;align-items:center;gap:9px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:12px}
+.check-row.hidden{display:none}
+input[type="checkbox"]{width:18px;height:18px;accent-color:var(--teal)}
+input[type="radio"]{width:16px;height:16px;accent-color:var(--teal)}
+input[type="file"]{min-height:38px;padding:8px;border:1px dashed #aab7c6;border-radius:8px;background:var(--panel-2);width:100%}
+.radio-row{display:flex;align-items:flex-start;gap:9px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px;cursor:pointer}
+.radio-row .lbl{font-weight:700}
+.radio-row .sub{display:block;margin-top:2px;color:var(--muted);font-size:12px;font-weight:400}
+.btn-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px}
+button,.button-link{min-height:38px;border:1px solid transparent;border-radius:8px;background:var(--teal);color:#fff;padding:8px 16px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;box-shadow:0 4px 12px rgba(15,118,110,.2);transition:transform 120ms,box-shadow 120ms,background 120ms}
+button:hover,.button-link:hover{background:var(--teal-dark);box-shadow:0 6px 16px rgba(15,118,110,.28);transform:translateY(-1px)}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-danger{background:var(--rose)!important;box-shadow:0 4px 12px rgba(190,18,60,.2)!important}
+.hint-text{color:var(--muted);font-size:13px;margin:0 0 12px}
+.warn-box{display:flex;gap:10px;background:var(--amber-bg);border:1px solid var(--amber-border);border-radius:8px;padding:12px 14px;font-size:13px;color:#78350f;line-height:1.5;margin-bottom:14px}
+.warn-icon{font-size:18px;flex-shrink:0;line-height:1.3}
+.status-msg{margin-top:12px;font-size:13px;font-weight:700}
+.status-msg.ok{color:var(--green)}
+.status-msg.bad{color:var(--rose)}
+.restore-options{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.restore-options.visible{display:block}
+.restore-options h3{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.help-box{margin:0 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);overflow:hidden}
+.help-box summary{cursor:pointer;list-style:none;padding:9px 12px;font-size:13px;font-weight:700;color:var(--blue);display:flex;align-items:center;gap:6px;user-select:none}
+.help-box summary::-webkit-details-marker{display:none}
+.help-box summary::before{content:"\25B8";display:inline-block;color:var(--muted);transition:transform 120ms}
+.help-box[open] summary::before{transform:rotate(90deg)}
+.help-box .help-body{padding:2px 14px 12px;font-size:13px;color:var(--ink);line-height:1.5}
+.help-box .help-body p{margin:8px 0}
+.help-box .help-body .ex{color:var(--muted);font-size:12px}
+.help-box .help-body code{background:#fff;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px}
+.help-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+.help-table th{text-align:left;padding:7px 10px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--line)}
+.help-table td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.5}
+.help-table tr:last-child td{border-bottom:none}
+.help-table td:first-child{font-weight:700;white-space:nowrap;color:var(--ink)}
+.help-table .ex{display:block;margin-top:4px;color:var(--muted);font-size:12px;font-weight:400}
+@media(max-width:640px){.topbar{grid-template-columns:1fr}.topbar .meta{min-width:0;text-align:left}
+.help-table,.help-table tbody,.help-table tr,.help-table td{display:block;width:auto}
+.help-table th{display:none}
+.help-table tr{padding:9px 0;border-bottom:1px solid var(--line)}
+.help-table tr:last-child{border-bottom:none}
+.help-table td{border-bottom:none;padding:3px 0}
+.help-table td:first-child{font-size:13px}
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div>
+      <h1>Backup &amp; Restore</h1>
+      <div class="hint">Download every setting on this board, or restore from a previously saved backup.</div>
+    </div>
+    <div class="meta">
+      <div>This board's ID: <strong id="this-chipid">&mdash;</strong></div>
+      <a class="back-link" href="/">&#8592; Back to Config</a>
+      <a class="back-link" href="./FirmwareMaintenance.html">&#128296; Firmware Maintenance</a>
+    </div>
+  </header>
+
+  <!-- Backup -->
+  <div class="card">
+    <h2>Download Backup</h2>
+    <p class="hint-text">Bundles every configuration file on this board into a single downloadable file. Optionally also include the on-board web UI pages for a complete filesystem clone.</p>
+    <label class="check-row">
+      <input type="checkbox" id="chk-include-web">
+      Also include web UI files (HTML/CSS/JS, .gz) &mdash; full filesystem backup
+    </label>
+    <div class="btn-row">
+      <a class="button-link" id="btn-download" href="/api/backup?includeWeb=0">&#8595; Download Full Backup</a>
+    </div>
+  </div>
+
+  <!-- Restore -->
+  <div class="card danger">
+    <h2>Restore from Backup</h2>
+    <div class="warn-box">
+      <span class="warn-icon">&#9888;</span>
+      <span>Restoring overwrites the matching files on this board and reboots it. Any settings not present in the backup are left untouched. This cannot be undone &mdash; make sure you have chosen the right file.</span>
+    </div>
+    <input type="file" id="file-input" accept="application/json,.json">
+
+    <div class="restore-options" id="restore-options">
+      <h3>Controller ID</h3>
+      <details class="help-box" id="chipid-help" style="display:none">
+        <summary>What's the difference between these options?</summary>
+        <div class="help-body">
+          <p><strong>Why this matters:</strong> this board's MQTT/HomeKit topics have a controller ID baked into them as plain text, e.g. <code>/home/Controller<span id="help-this-id">XXXXXXXXXXXX</span>/Coils/C0</code>. A backup is just a snapshot of those text files, so it carries whatever ID(s) happened to be embedded at the time &mdash; which isn't always the same as the <code>_chipid</code> recorded in the backup's own metadata (that field only ever records the hardware ID of whichever board generated the backup).</p>
+          <table class="help-table">
+            <tr><th>Option</th><th>What it does</th><th>When to pick it</th></tr>
+            <tr>
+              <td>Keep the backed-up controller ID</td>
+              <td>Writes every file back <strong>exactly as stored, byte-for-byte</strong>. No scanning, no rewriting &mdash; whatever controller ID(s) were already embedded in the backup's text stay exactly as they were, even if that doesn't match the backup's own <code>_chipid</code> metadata, and even if it doesn't match this board.</td>
+              <td>A true 1:1 swap &mdash; you want this board to keep responding under the exact identity the backup's text already contains.</td>
+            </tr>
+            <tr>
+              <td>Use this board's controller ID</td>
+              <td>Scans every restored file for any <code>Controller&lt;ID&gt;</code> reference and rewrites all of them to <strong>this board's own live hardware ID</strong> (<code id="help-this-id-2">&mdash;</code>, fixed in silicon &mdash; the same value any fresh backup taken from this board would record as <code>_chipid</code>). Cleans up any stray/mismatched IDs the backup happened to contain.</td>
+              <td>Cloning settings onto a board that should keep announcing its own identity.</td>
+            </tr>
+            <tr>
+              <td>Force every topic to the backup's recorded ID</td>
+              <td>Scans the same way, but rewrites every reference to the ID in the backup's <code>_chipid</code> metadata (<code id="help-orig-id">&mdash;</code>) instead &mdash; regardless of what was actually embedded in the files, and regardless of this board's own hardware ID.</td>
+              <td>A dead-board replacement where outside systems (broker ACLs, HomeKit pairings, automations) are hard-wired to the original board's ID and this board needs to impersonate it exactly.</td>
+            </tr>
+          </table>
+          <p class="ex">Note: this board's hardware ID can never change &mdash; it's derived from the chip itself. If you force a different ID with the third option, anything that later regenerates settings from scratch (factory reset, adding a relay, etc.) will mint fresh entries under this board's <em>real</em> ID, re-introducing the mismatch.</p>
+        </div>
+      </details>
+      <div class="hint-text" id="chipid-note" style="display:none"></div>
+      <div id="chipid-radio-group" style="display:none">
+        <label class="radio-row">
+          <input type="radio" name="chipid-mode" value="keep" checked>
+          <span><span class="lbl">Keep the backed-up controller ID (<span id="old-chipid">&mdash;</span>)</span><span class="sub">Exact restore &mdash; recommended when replacing a board 1:1, so MQTT/HomeKit topics keep working under the same identity.</span></span>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="chipid-mode" value="replace">
+          <span><span class="lbl">Use this board's controller ID (<span id="new-chipid">&mdash;</span>)</span><span class="sub">Rewrites every reference to the backed-up ID with this board's own ID &mdash; use when cloning settings onto a board that keeps its own identity.</span></span>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="chipid-mode" value="original">
+          <span><span class="lbl">Force every topic to the backup's recorded ID (<span id="orig-chipid">&mdash;</span>)</span><span class="sub">Rewrites every reference &mdash; no matter what ID is currently embedded &mdash; to the ID recorded in the backup's metadata. Use for a 1:1 dead-board replacement when you need MQTT/HomeKit subscriptions that already expect that exact ID to keep working.</span></span>
+        </label>
+      </div>
+
+      <label class="check-row hidden" id="row-restore-web">
+        <input type="checkbox" id="chk-restore-web">
+        Restore web UI files only (HTML/CSS/JS, .gz) &mdash; skips config files
+      </label>
+
+      <div class="btn-row">
+        <button class="btn-danger" id="btn-restore" disabled>&#8593; Restore &amp; Reboot</button>
+      </div>
+    </div>
+    <div class="status-msg" id="restore-status"></div>
+  </div>
+
+  <!-- Reset to defaults -->
+  <div class="card danger">
+    <h2>Reset Configuration to Defaults</h2>
+    <div class="warn-box">
+      <span class="warn-icon">&#9888;</span>
+      <span>Deletes every configuration file on this board (system, relays, sensors) and recreates them with factory defaults using this board's controller ID, then reboots. Timer schedules and automation rules are kept but disabled (re-enable them manually after reset). Web UI files are not affected. This cannot be undone.</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn-danger" id="btn-reset-config">Reset All Config to Defaults &amp; Reboot</button>
+    </div>
+    <div class="status-msg" id="reset-status"></div>
+  </div>
+</main>
+
+<script>
+var thisChipId = '';
+var parsedBackup = null;
+var selectedFile = null;
+var wb_Timer1;
+
+function setText(id, text) {
+  var e = document.getElementById(id);
+  if (e) e.textContent = text;
+}
+
+function loadThisChipId() {
+  fetch('/GetConfig.json', {credentials:'same-origin'})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      thisChipId = d.NODEID || '';
+      setText('this-chipid', thisChipId || '—');
+      setText('new-chipid', thisChipId || '—');
+      updateChipIdRow();
+    })
+    .catch(function(){ setText('this-chipid', '—'); });
+}
+
+// Choosing between "keep" and "replace" only makes sense when the backup's
+// chip ID actually differs from this board's — otherwise both choices are
+// the same no-op, and a radio group with a single selectable (and therefore
+// un-deselectable) option just looks broken. So show the radio group only
+// when there's a real choice to make; otherwise show a plain info line and
+// pin the mode to "keep" (a no-op restore-as-is). Re-run whenever either the
+// backup or this board's chip ID becomes available, since loadThisChipId()'s
+// fetch can resolve before or after the user picks a backup file.
+function updateChipIdRow() {
+  if (!parsedBackup) return;
+  var oldId = parsedBackup._chipid || '';
+  var group = document.getElementById('chipid-radio-group');
+  var help = document.getElementById('chipid-help');
+  var note = document.getElementById('chipid-note');
+  var hasChoice = !!(oldId && thisChipId && oldId !== thisChipId);
+
+  setText('help-this-id', thisChipId || '—');
+  setText('help-this-id-2', thisChipId || '—');
+  setText('help-orig-id', oldId || '—');
+
+  if (hasChoice) {
+    group.style.display = '';
+    help.style.display = '';
+    note.style.display = 'none';
+  } else {
+    document.querySelector('input[name="chipid-mode"][value="keep"]').checked = true;
+    group.style.display = 'none';
+    help.style.display = 'none';
+    help.removeAttribute('open');
+    note.textContent = oldId
+      ? ('Controller ID: ' + oldId + ' — matches this board, so settings will be restored as-is.')
+      : 'Controller ID could not be determined — settings will be restored as-is.';
+    note.style.display = '';
+  }
+}
+
+document.getElementById('chk-include-web').addEventListener('change', function() {
+  document.getElementById('btn-download').setAttribute('href', '/api/backup?includeWeb=' + (this.checked ? '1' : '0'));
+});
+
+document.getElementById('file-input').addEventListener('change', function() {
+  var status = document.getElementById('restore-status');
+  status.textContent = '';
+  status.className = 'status-msg';
+  parsedBackup = null;
+  selectedFile = null;
+  document.getElementById('restore-options').classList.remove('visible');
+  document.getElementById('btn-restore').disabled = true;
+
+  var file = this.files && this.files[0];
+  if (!file) return;
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var data;
+    try {
+      data = JSON.parse(e.target.result);
+    } catch (err) {
+      status.textContent = 'This does not look like a valid backup file (not JSON).';
+      status.className = 'status-msg bad';
+      return;
+    }
+    if (!data || !data._backup_version) {
+      status.textContent = 'This does not look like a recognized backup file.';
+      status.className = 'status-msg bad';
+      return;
+    }
+
+    parsedBackup = data;
+    selectedFile = file;
+
+    setText('old-chipid', (data._chipid || '') || '(unknown)');
+    setText('orig-chipid', (data._chipid || '') || '(unknown)');
+    updateChipIdRow();
+
+    var rowRestoreWeb = document.getElementById('row-restore-web');
+    if (data._includesWeb) {
+      rowRestoreWeb.classList.remove('hidden');
+    } else {
+      rowRestoreWeb.classList.add('hidden');
+      document.getElementById('chk-restore-web').checked = false;
+    }
+
+    document.getElementById('restore-options').classList.add('visible');
+    document.getElementById('btn-restore').disabled = false;
+  };
+  reader.onerror = function() {
+    status.textContent = 'Could not read the selected file.';
+    status.className = 'status-msg bad';
+  };
+  reader.readAsText(file);
+});
+
+document.getElementById('btn-restore').addEventListener('click', function() {
+  if (!selectedFile || !parsedBackup) return;
+
+  var chipIdMode = document.querySelector('input[name="chipid-mode"]:checked').value;
+  var restoreWeb = document.getElementById('chk-restore-web').checked;
+
+  var msg = restoreWeb
+    ? 'This will overwrite the web UI files on this board (config files will not be touched)'
+    : 'This will overwrite the matching settings on this board';
+  msg += ', then reboot it.\n\nThis cannot be undone. Continue?';
+  if (!window.confirm(msg)) return;
+
+  var btn = this;
+  var status = document.getElementById('restore-status');
+  btn.disabled = true;
+  status.textContent = 'Uploading and restoring…';
+  status.className = 'status-msg';
+
+  fetch('/api/restore?chipIdMode=' + encodeURIComponent(chipIdMode) + '&restoreWeb=' + (restoreWeb ? '1' : '0'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: selectedFile
+  })
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d && d.ok) {
+        status.textContent = (d.message || 'Restore complete') + ' — rebooting, you will be redirected to Home in a moment…';
+        status.className = 'status-msg ok';
+        wb_Timer1 = setTimeout(function(){ window.location.href = '/'; }, 15000);
+      } else {
+        status.textContent = (d && d.message) ? d.message : 'Restore failed.';
+        status.className = 'status-msg bad';
+        btn.disabled = false;
+      }
+    })
+    .catch(function() {
+      status.textContent = 'Restore failed — the device may already be rebooting.';
+      status.className = 'status-msg bad';
+    });
+});
+
+document.getElementById('btn-reset-config').addEventListener('click', function() {
+  var msg = 'This will delete every configuration file on this board (system, relays, sensors) ' +
+            'and recreate them with factory defaults, then reboot.\n\n' +
+            'Timer schedules and automation rules are kept but disabled (re-enable them ' +
+            'manually after reset). Web UI files are not affected.\n\n' +
+            'This cannot be undone. Continue?';
+  if (!window.confirm(msg)) return;
+
+  var btn = this;
+  var status = document.getElementById('reset-status');
+  btn.disabled = true;
+  status.textContent = 'Resetting configuration…';
+  status.className = 'status-msg';
+
+  fetch('/api/resetconfig', { method: 'POST', credentials: 'same-origin' })
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d && d.ok) {
+        status.textContent = (d.message || 'Configuration reset') + ' — rebooting, you will be redirected to Home in a moment…';
+        status.className = 'status-msg ok';
+        wb_Timer1 = setTimeout(function(){ window.location.href = '/'; }, 15000);
+      } else {
+        status.textContent = (d && d.message) ? d.message : 'Reset failed.';
+        status.className = 'status-msg bad';
+        btn.disabled = false;
+      }
+    })
+    .catch(function() {
+      status.textContent = 'Reset failed — the device may already be rebooting.';
+      status.className = 'status-msg bad';
+    });
+});
+
+loadThisChipId();
+</script>
+</body>
+</html>

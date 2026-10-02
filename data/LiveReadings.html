@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Readings</title>
+<style>
+:root{--page:#edf1f5;--ink:#152033;--muted:#687589;--panel:#fff;--panel-2:#f8fafc;--line:#d9e1ea;--teal:#0f766e;--teal-dark:#0a5f59;--blue:#2563eb;--amber:#b7791f;--rose:#be123c;--green:#15803d;--slate:#475569;--shadow-sm:0 2px 8px rgba(21,32,51,.06);--shadow:0 18px 45px rgba(21,32,51,.12)}
+*{box-sizing:border-box}
+html{background:var(--page)}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.42;background:linear-gradient(180deg,#dfe9f3 0,#edf1f5 320px),var(--page)}
+.shell{width:min(1200px,calc(100vw - 24px));margin:0 auto;padding:20px 0 36px}
+.topbar{overflow:hidden;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:20px 24px;background:linear-gradient(135deg,#152033,#103f49,#0f766e);box-shadow:var(--shadow);display:grid;grid-template-columns:1fr auto;gap:16px;align-items:center}
+.topbar h1{margin:0;font-size:26px;font-weight:700}
+.topbar-sub{margin-top:6px;color:#cfe0ea;font-size:13px}
+.topbar-meta{text-align:right;color:#e6eef5;font-size:13px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:10px 14px;min-width:210px}
+.topbar-meta div+div{margin-top:3px}
+.dash{margin-top:16px;display:grid;gap:14px}
+.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-sm);padding:16px}
+.card-head{display:flex;align-items:center;gap:8px;padding-bottom:12px;margin-bottom:14px;border-bottom:1px solid var(--line)}
+.card-head h2{margin:0;font-size:15px;font-weight:700;color:var(--ink)}
+.config-link{margin-left:auto;padding:4px 9px;border:1px solid #b8c7d7;border-radius:6px;color:var(--teal);background:#f8fafc;font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background 120ms,color 120ms}
+.config-link:hover{background:var(--teal);color:#fff;border-color:var(--teal)}
+.card-accent{width:8px;height:22px;border-radius:4px;flex:0 0 auto;background:var(--teal)}
+.card-accent.blue{background:var(--blue)}
+.card-accent.amber{background:var(--amber)}
+.card-accent.rose{background:var(--rose)}
+.card-accent.green{background:var(--green)}
+.card-accent.slate{background:var(--slate)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;flex:0 0 auto;background:#94a3b8}
+.dot.on{background:#16a34a;box-shadow:0 0 0 2px #bbf7d0}
+.dot.off{background:#dc2626;box-shadow:0 0 0 2px #fecaca}
+.dot.warn{background:var(--amber)}
+.metric-row{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line);gap:8px}
+.metric-row:last-child{border-bottom:none;padding-bottom:0}
+.metric-label{color:var(--muted);font-size:12px;font-weight:700;flex:0 0 auto}
+.metric-value{font-size:14px;font-weight:700;color:var(--ink);text-align:right;word-break:break-all}
+.metric-unit{color:var(--muted);font-size:11px;font-weight:400;margin-left:2px}
+.live-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.live-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.live-grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+.live-grid.four .live-value{font-size:18px}
+.live-grid.four .live-label{font-size:9px}
+.live-box{border:1px solid var(--line);border-radius:8px;background:var(--panel-2);padding:12px;text-align:center}
+.live-box.accent{border-color:#a7f3d0;background:#f0fdf4}
+.live-box.blue-tint{border-color:#bfdbfe;background:#eff6ff}
+.live-label{color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.live-value{font-size:24px;font-weight:700;color:var(--teal);line-height:1}
+.live-unit{color:var(--muted);font-size:11px;margin-top:3px}
+.live-kwh{color:var(--teal-dark);font-size:12px;font-weight:700;margin-top:5px;border-top:1px solid #a7f3d0;padding-top:5px}
+.relay-grid{display:flex;flex-direction:column;gap:8px}
+.relay-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2)}
+.relay-row.on{background:#dcfce7;border-color:#86efac}
+.relay-row.off{background:#fee2e2;border-color:#fca5a5}
+.relay-name{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
+.toggle{position:relative;display:inline-block;user-select:none;touch-action:manipulation}
+.toggle input{position:absolute;opacity:0;pointer-events:none}
+.toggle,.toggle *,.toggle input:focus,.toggle input:active{outline:none}
+.toggle.pill{width:64px;height:30px}
+.toggle.pill input:disabled+.track{cursor:not-allowed;opacity:.5}
+.toggle.pill .track{position:absolute;inset:0;cursor:pointer;border-radius:999px;background:rgba(220,38,38,.14);border:1px solid rgba(220,38,38,.4);box-shadow:inset 0 1px 3px rgba(0,0,0,.12);transition:background .25s ease,border-color .25s ease}
+.toggle.pill .track::before{content:"";position:absolute;width:24px;height:24px;top:2px;left:3px;border-radius:50%;background:#94a3b8;box-shadow:0 2px 5px rgba(0,0,0,.3);transition:transform .25s cubic-bezier(.4,0,.2,1)}
+.toggle.pill .track:hover::before{box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.toggle.pill .lbl{position:absolute;top:50%;transform:translateY(-50%);font-size:10px;font-weight:800;letter-spacing:.06em;transition:opacity .2s ease}
+.toggle.pill .lbl.off{right:7px;color:#dc2626;opacity:1}
+.toggle.pill .lbl.on{left:8px;color:#16a34a;opacity:0}
+.toggle.pill input:checked+.track{background:rgba(22,163,74,.14);border-color:rgba(22,163,74,.4)}
+.toggle.pill input:checked+.track::before{transform:translateX(34px)}
+.toggle.pill input:checked+.track .lbl.off{opacity:0}
+.toggle.pill input:checked+.track .lbl.on{opacity:1}
+.live-status{margin-top:10px;font-size:11px;color:var(--muted);text-align:right}
+.back-link{display:inline-flex;align-items:center;gap:6px;margin-top:14px;padding:8px 14px;background:var(--slate);color:#fff;border:none;border-radius:8px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;font-size:13px;box-shadow:0 4px 10px rgba(71,85,105,.18)}
+.back-link:hover{background:#334155}
+.timer-list{display:flex;flex-direction:column;gap:10px}
+.timer-card{border:1px solid var(--line);border-radius:8px;background:var(--panel-2);overflow:hidden}
+.timer-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+.timer-card-head .timer-id{color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase}
+.timer-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 8px;margin-bottom:8px;font-size:13px;font-weight:700}
+.timer-meta-sep{color:var(--muted);font-weight:400}
+.timer-meta-dur{color:var(--muted);font-size:11px;font-weight:400}
+.timer-badge{margin-left:auto;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;text-transform:uppercase}
+.timer-badge.running{background:#dcfce7;color:#15803d;border:1px solid #86efac}
+.timer-badge.inactive{background:#f1f5f9;color:#64748b;border:1px solid var(--line)}
+.timer-badge.disabled{background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5}
+.timer-badge.paused{background:#fef9c3;color:#854d0e;border:1px solid #fde047}
+.timer-body{padding:10px 12px;font-size:13px}
+.timer-detail{color:var(--muted);margin-bottom:6px}
+.timer-detail strong{color:var(--ink)}
+.timer-countdown{margin-top:8px;padding:7px 10px;border-radius:6px;font-size:13px;font-weight:700;display:flex;align-items:center;flex-wrap:wrap;justify-content:space-between;gap:6px 8px}
+.timer-countdown.ct-on{background:#dcfce7;color:#15803d}
+.timer-countdown.ct-off{background:#eff6ff;color:#1e40af}
+.timer-countdown.ct-paused{background:#fef9c3;color:#854d0e}
+.timer-ctrl-btn{padding:4px 10px;border:none;border-radius:6px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;flex:0 0 auto}
+.timer-ctrl-btn.pause-btn{background:#fde047;color:#713f12}
+.timer-ctrl-btn.resume-btn{background:#86efac;color:#14532d}
+.timer-ctrl-btn:disabled{opacity:.4;cursor:not-allowed}
+.days-row{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px}
+.day-pip{padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;background:var(--panel-2);border:1px solid var(--line);color:var(--muted)}
+.day-pip.active{background:#dbeafe;border-color:#93c5fd;color:#1e40af}
+.hidden{display:none!important}
+@media(max-width:900px){.cols-3{grid-template-columns:1fr}}
+@media(max-width:600px){.cols-2{grid-template-columns:1fr}.live-grid{grid-template-columns:repeat(2,1fr)}.live-grid.four{grid-template-columns:repeat(2,1fr)}.live-grid.four .live-value{font-size:20px}.live-grid.four .live-label{font-size:10px}.topbar{grid-template-columns:1fr}.topbar-meta{text-align:left;min-width:0}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div>
+      <h1>Live Readings</h1>
+      <div class="topbar-sub">Node: <strong id="t-node">&mdash;</strong> &nbsp;|&nbsp; <span id="t-loc">&mdash;</span></div>
+    </div>
+    <div class="topbar-meta">
+      <div>Time: <strong id="t-time">&mdash;</strong></div>
+      <div>Uptime: <strong id="t-uptime">&mdash;</strong></div>
+      <div>Free heap: <strong id="t-heap">&mdash;</strong> B &nbsp;|&nbsp; min: <strong id="t-heap-min">&mdash;</strong> B &nbsp;|&nbsp; max blk: <strong id="t-heap-blk">&mdash;</strong> B</div>
+    </div>
+  </header>
+
+  <div class="dash cols-2" style="margin-top:14px;">
+    <div class="card">
+      <div class="card-head"><div class="card-accent blue"></div><h2>WiFi</h2><a class="config-link" href="/">Configure</a></div>
+      <div class="metric-row"><span class="metric-label">Status</span><span class="metric-value" id="wifi-status"><span class="dot" id="wifi-dot"></span>&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">IP Address</span><span class="metric-value" id="wifi-ip">&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">Gateway</span><span class="metric-value" id="wifi-gw">&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">DNS 1</span><span class="metric-value" id="wifi-dns1">&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">DNS 2</span><span class="metric-value" id="wifi-dns2">&mdash;</span></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><div class="card-accent amber"></div><h2>MQTT</h2><a class="config-link" href="/">Configure</a></div>
+      <div class="metric-row"><span class="metric-label">Status</span><span class="metric-value" id="mqtt-status"><span class="dot" id="mqtt-dot"></span>&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">Server</span><span class="metric-value" id="mqtt-server">&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">Route</span><span class="metric-value" id="mqtt-route">&mdash;</span></div>
+      <div class="metric-row"><span class="metric-label">Health Topic</span><span class="metric-value" id="mqtt-health">&mdash;</span></div>
+    </div>
+  </div>
+
+  <div class="dash cols-2" style="margin-top:0;">
+    <div class="card">
+      <div class="card-head"><div class="card-accent green"></div><h2>Relay States</h2><a class="config-link" href="/RelayConfig.html">Configure</a></div>
+      <div class="relay-grid" id="relay-badges"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><div class="card-accent blue"></div><h2>Temperature Sensors</h2><a class="config-link" href="/AdvancedTemperatureConf.html">Configure</a></div>
+      <div class="live-grid two">
+        <div class="live-box"><div class="live-label">Tank Sensor (GPIO14)</div><div class="live-value" id="temp1">&mdash;</div><div class="live-unit">&deg;C</div></div>
+        <div class="live-box"><div class="live-label">Panel Sensor (GPIO12)</div><div class="live-value" id="temp2">&mdash;</div><div class="live-unit">&deg;C</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card hidden" id="sec-emon" style="margin-top:14px;">
+    <div class="card-head"><div class="card-accent amber"></div><h2>Power Monitor (CT Sensor)</h2><a class="config-link" href="/CurrentConfig.html">Configure</a></div>
+    <div class="dash cols-3" style="margin-top:0;gap:10px;">
+      <div class="live-grid four" style="grid-column:1/-1;">
+        <div class="live-box"><div class="live-label">Voltage</div><div class="live-value" id="ct-voltage">&mdash;</div><div class="live-unit">V</div></div>
+        <div class="live-box"><div class="live-label">Current</div><div class="live-value" id="ct-current">&mdash;</div><div class="live-unit">A</div></div>
+        <div class="live-box"><div class="live-label">Real Power</div><div class="live-value" id="ct-power">&mdash;</div><div class="live-unit">W</div></div>
+        <div class="live-box"><div class="live-label">Power Factor</div><div class="live-value" id="ct-pf">&mdash;</div></div>
+      </div>
+      <div class="live-box accent"><div class="live-label">Today</div><div class="live-value" id="ct-wh-kwh">&mdash;</div><div class="live-unit">kWh</div><div class="live-kwh"><span id="ct-wh">&mdash;</span> Wh</div></div>
+      <div class="live-box accent"><div class="live-label">Month to Date</div><div class="live-value" id="ct-mtd-kwh">&mdash;</div><div class="live-unit">kWh</div><div class="live-kwh"><span id="ct-mtd">&mdash;</span> Wh</div></div>
+      <div class="live-box accent"><div class="live-label">Year to Date</div><div class="live-value" id="ct-ytd-kwh">&mdash;</div><div class="live-unit">kWh</div><div class="live-kwh"><span id="ct-ytd">&mdash;</span> Wh</div></div>
+    </div>
+  </div>
+
+  <div class="dash cols-2" id="sec-battery-row" style="margin-top:0;">
+    <div class="card hidden" id="sec-ads">
+      <div class="card-head"><div class="card-accent"></div><h2>Battery Voltage (ADS)</h2><a class="config-link" href="/ADS11x5Config.html">Configure</a></div>
+      <div class="live-grid two">
+        <div class="live-box accent"><div class="live-label">AIN2 Scaled</div><div class="live-value" id="ads-sv2">&mdash;</div><div class="live-unit">V</div></div>
+        <div class="live-box accent"><div class="live-label">AIN3 Scaled</div><div class="live-value" id="ads-sv3">&mdash;</div><div class="live-unit">V</div></div>
+      </div>
+    </div>
+    <div class="card hidden" id="sec-hst">
+      <div class="card-head"><div class="card-accent rose"></div><h2>Battery Charging / Discharging Current</h2><a class="config-link" href="/HSTConfig.html">Configure</a></div>
+      <div class="live-grid two">
+        <div class="live-box"><div class="live-label">RMS Current</div><div class="live-value" id="hst-rms">&mdash;</div><div class="live-unit">A</div></div>
+        <div class="live-box"><div class="live-label">DC Current</div><div class="live-value" id="hst-dc">&mdash;</div><div class="live-unit">A</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dash cols-2" id="sec-peripherals-row" style="margin-top:0;">
+    <div class="card hidden" id="sec-wfs">
+      <div class="card-head"><div class="card-accent blue"></div><h2>Water Flow Sensor</h2><a class="config-link" href="/WaterFlowSensor.html">Configure</a></div>
+      <div class="live-grid">
+        <div class="live-box"><div class="live-label">Pulses / sec</div><div class="live-value" id="wfs-pps">&mdash;</div></div>
+        <div class="live-box blue-tint"><div class="live-label">Flow Rate</div><div class="live-value" id="wfs-flow">&mdash;</div><div class="live-unit">L / min</div></div>
+        <div class="live-box blue-tint"><div class="live-label">Total Volume</div><div class="live-value" id="wfs-total">&mdash;</div><div class="live-unit">L</div></div>
+      </div>
+    </div>
+    <div class="card hidden" id="sec-pressure">
+      <div class="card-head"><div class="card-accent slate"></div><h2>Pressure / Level Sensor</h2><a class="config-link" href="/PressureSensorConfig.html">Configure</a></div>
+      <div class="live-grid">
+        <div class="live-box"><div class="live-label">ADC Reading</div><div class="live-value" id="prs-adc">&mdash;</div></div>
+        <div class="live-box"><div class="live-label">Level</div><div class="live-value" id="prs-cm">&mdash;</div><div class="live-unit">cm</div></div>
+        <div class="live-box accent"><div class="live-label">Fill %</div><div class="live-value" id="prs-pct">&mdash;</div><div class="live-unit">%</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px;">
+    <div class="card-head"><div class="card-accent amber"></div><h2>Scheduled Timers</h2><a class="config-link" href="/Timer1">Configure</a></div>
+    <div class="timer-list" id="timer-list"><div style="color:var(--muted);font-size:13px;">Loading timers&hellip;</div></div>
+  </div>
+
+  <div class="live-status" id="lv-status">Connecting&hellip;</div>
+  <a class="back-link" href="/">&#8592; Back to Config</a>
+</main>
+<script>
+var _flags={},_wfsPrev=null;
+
+function txt(id,v){var e=document.getElementById(id);if(e)e.textContent=(v!=null&&v!=='')? String(v):'—';}
+function show(id){var e=document.getElementById(id);if(e)e.classList.remove('hidden');}
+function setDot(id,ok){var d=document.getElementById(id);if(d)d.className='dot '+(ok?'on':'off');}
+
+function relayBadges(arr){
+  var c=document.getElementById('relay-badges');if(!c)return;
+  if(!arr||!arr.length){c.textContent='No relays found.';return;}
+  arr.forEach(function(r){
+    var on=String(r.state).toUpperCase()==='ON';
+    var rowId='relay-row-'+r.nb,row=document.getElementById(rowId);
+    var inner='<div class="relay-name"><span class="dot '+(on?'on':'off')+'"></span>Relay '+r.nb+': <span>'+r.state+'</span></div>'+
+      '<label class="toggle pill"><input type="checkbox" '+(on?'checked':'')+' onchange="ctrlRelay('+r.nb+',this.checked?\'ON\':\'OFF\',this)"><span class="track"><span class="lbl off">OFF</span><span class="lbl on">ON</span></span></label>';
+    if(row){row.className='relay-row '+(on?'on':'off');row.innerHTML=inner;}
+    else{var el=document.createElement('div');el.id=rowId;el.className='relay-row '+(on?'on':'off');el.innerHTML=inner;c.appendChild(el);}
+  });
+}
+
+function ctrlRelay(nb,action,input){
+  var row=document.getElementById('relay-row-'+nb);
+  if(input)input.disabled=true;
+  var t0=Date.now();
+  // Re-enable after response but enforce a minimum 300 ms between toggles so
+  // rapid clicking does not open many simultaneous TCP connections (each holds
+  // ~8 KB of lwIP buffers for several minutes via HTTP keep-alive).
+  function reenable(){setTimeout(function(){if(input)input.disabled=false;},Math.max(0,300-(Date.now()-t0)));}
+  fetch('/RelayControl.json?relay='+nb+'&action='+action)
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var on=d.state==='ON';
+      if(row){
+        row.className='relay-row '+(on?'on':'off');
+        var n=row.querySelector('.relay-name');
+        if(n)n.innerHTML='<span class="dot '+(on?'on':'off')+'"></span>Relay '+nb+': <span>'+d.state+'</span>';
+      }
+      if(input)input.checked=on;
+      reenable();
+    })
+    .catch(function(){if(input)input.checked=!input.checked;reenable();});
+}
+
+function applyFlags(f){
+  _flags=f;
+  if(f.emonlib)show('sec-emon');
+  if(f.ads1x15)show('sec-ads');
+  if(f.hst)show('sec-hst');
+  if(f.waterFlowSensor)show('sec-wfs');
+  if(f.pressureSensor)show('sec-pressure');
+}
+
+function pollSensors(){
+  fetch('/SensorStatus.json').then(function(r){return r.json();}).then(function(d){
+    txt('temp1',d.ATEMP1);txt('temp2',d.ATEMP2);
+    txt('ct-voltage',d.CT_VOLTAGE);txt('ct-current',d.CT_CURRENT);txt('ct-power',d.CT_POWER);txt('ct-pf',d.CT_PF);
+    txt('ct-wh',d.CT_WH);txt('ct-mtd',d.CT_MTD_WH);txt('ct-ytd',d.CT_YTD_WH);
+    function kwh(v){var n=parseFloat(v);return isNaN(n)?'—':(n/1000).toFixed(3);}
+    txt('ct-wh-kwh',kwh(d.CT_WH));txt('ct-mtd-kwh',kwh(d.CT_MTD_WH));txt('ct-ytd-kwh',kwh(d.CT_YTD_WH));
+    txt('t-time',d.time);txt('t-uptime',d.uptime);
+    if(d.heap!=null)txt('t-heap',Number(d.heap).toLocaleString());
+    if(d.heapMin!=null)txt('t-heap-min',Number(d.heapMin).toLocaleString());
+    if(d.heapMaxBlk!=null)txt('t-heap-blk',Number(d.heapMaxBlk).toLocaleString());
+    if(d.relays)relayBadges(d.relays);
+    document.getElementById('lv-status').textContent='Updated '+new Date().toLocaleTimeString();
+  }).catch(function(){document.getElementById('lv-status').textContent='Sensor read error — retrying…';});
+}
+
+function pollADS(){
+  if(!_flags.ads1x15&&!_flags.hst)return;
+  fetch('/api/ads').then(function(r){return r.json();}).then(function(d){
+    txt('ads-sv2',d.sv2!=null?d.sv2.toFixed(2):'—');
+    txt('ads-sv3',d.sv3!=null?d.sv3.toFixed(2):'—');
+    txt('hst-rms',d.rms!=null?d.rms.toFixed(2):'—');txt('hst-dc',d.dc!=null?d.dc.toFixed(2):'—');
+  });
+}
+
+function pollWFS(){
+  if(!_flags.waterFlowSensor)return;
+  fetch('/api/wfs').then(function(r){return r.json();}).then(function(d){
+    var pps='—';
+    if(_wfsPrev!==null){var delta=d.pulses-_wfsPrev;if(delta<0)delta+=0x100000000;pps=delta;}
+    _wfsPrev=d.pulses;
+    txt('wfs-pps',pps);txt('wfs-flow',d.flow!=null?d.flow.toFixed(1):'—');txt('wfs-total',d.total!=null?d.total.toFixed(3):'—');
+  });
+}
+
+function pollPressure(){
+  if(!_flags.pressureSensor)return;
+  fetch('/PressureSensor.json').then(function(r){return r.json();}).then(function(d){
+    txt('prs-adc',d.adc!=null?d.adc:'—');txt('prs-cm',d.cm!=null?d.cm.toFixed(1):'—');txt('prs-pct',d.fp!=null?d.fp.toFixed(1):'—');
+  });
+}
+
+function pollNetwork(){
+  fetch('/WifiStatus.json').then(function(r){return r.json();}).then(function(d){
+    setDot('wifi-dot',d.connected);txt('wifi-status',d.connected?'Connected':'Disconnected');
+    txt('wifi-ip',d.ip);txt('wifi-gw',d.gateway);txt('wifi-dns1',d.dns1);txt('wifi-dns2',d.dns2);
+  });
+  fetch('/MqttStatus.json').then(function(r){return r.json();}).then(function(d){
+    setDot('mqtt-dot',d.connected);txt('mqtt-status',d.status||(d.connected?'Connected':'Disconnected'));
+    txt('mqtt-server',d.server);txt('mqtt-route',d.route);txt('mqtt-health',d.healthTopic);
+  });
+}
+
+function loadSystemInfo(){
+  fetch('/GetConfig.json').then(function(r){return r.json();}).then(function(d){
+    txt('t-node',d.NODEID||d.MACADDR);txt('t-loc',d.PhyLoc);txt('t-time',d.systemtime);txt('t-uptime',d.uptime);
+    if(d.heap!=null)txt('t-heap',Number(d.heap).toLocaleString());
+  });
+}
+
+function fmtCD(s){
+  if(s<0)return '—';
+  var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60;
+  return d>0?d+'d '+h+'h':h>0?h+'h '+m+'m':m>0?m+'m '+sec+'s':sec+'s';
+}
+
+function daysLabel(days){
+  return ['Mo','Tu','We','Th','Fr','Sa','Su'].map(function(d){
+    return '<span class="day-pip'+(days[d]?' active':'')+'">' +d+'</span>';
+  }).join('');
+}
+
+function ctrlTimer(relay,action,btn){
+  if(btn)btn.disabled=true;
+  fetch('/TimerControl.json?relay='+relay+'&action='+action)
+    .then(function(r){return r.json();}).then(function(){pollTimers();})
+    .catch(function(){if(btn)btn.disabled=false;});
+}
+
+function pollTimers(){
+  fetch('/TimerStatus.json').then(function(r){return r.json();}).then(function(d){
+    var list=document.getElementById('timer-list');if(!list)return;
+    var found=d.timers.filter(function(t){return t.exists;});
+    if(!found.length){list.innerHTML='<div style="color:var(--muted);font-size:13px;">No timers configured.</div>';return;}
+    list.innerHTML='';
+    found.forEach(function(t){
+      var bc,bl;
+      if(!t.enabled){bc='disabled';bl='Disabled';}
+      else if(t.timerPaused){bc='paused';bl='Paused';}
+      else if(t.timerActive){bc='running';bl='Running';}
+      else{bc='inactive';bl='Inactive';}
+      var sched='';
+      if(t.type===1)sched='Date Range: <strong>'+t.dateFrom+' → '+t.dateTo+'</strong>';
+      else if(t.type===2)sched='Daily: <strong>'+t.dateFrom+' → '+t.dateTo+'</strong>';
+      else if(t.type===3)sched='Weekly: '+daysLabel(t.days);
+      else if(t.type===4)sched='Monthly on day <strong>'+t.monthDay+'</strong>';
+      else if(t.type===5)sched='Yearly';
+      else sched='Type: <strong>'+t.typeName+'</strong>';
+      var dh=t.markHours||0,dm=t.markMinutes||0;
+      var durHint=(dh+dm>0)?'<span class="timer-meta-dur">('+(dh>0?dh+'h ':'')+(dm>0?dm+'m':'')+')</span>':'';
+      var cc,ct,cb='';
+      if(!t.enabled){cc='';ct='Timer is disabled.';}
+      else if(t.timerPaused){cc='ct-paused';ct='⏸ Paused — would end in '+fmtCD(t.secondsToOff);cb='<button class="timer-ctrl-btn resume-btn" onclick="ctrlTimer('+t.relay+',\'resume\',this)">Resume</button>';}
+      else if(t.timerActive){cc='ct-on';ct='▶ Active — ends in '+fmtCD(t.secondsToOff);cb='<button class="timer-ctrl-btn pause-btn" onclick="ctrlTimer('+t.relay+',\'pause\',this)">Pause</button>';}
+      else{cc='ct-off';ct='◷ Next activation in '+fmtCD(t.secondsToOn);}
+      var card=document.createElement('div');
+      card.id='timer-card-'+t.id;card.className='timer-card';
+      card.innerHTML=
+        '<div class="timer-card-head"><span class="timer-id">Timer '+t.id+'</span>'+
+        '<span class="timer-badge '+bc+'">'+bl+'</span></div>'+
+        '<div class="timer-body">'+
+        '<div class="timer-meta"><span>Relay '+t.relay+'</span>'+
+        '<span class="timer-meta-sep">·</span>'+
+        '<span>'+t.timeFrom+' – '+t.timeTo+'</span>'+
+        durHint+'</div>'+
+        '<div class="timer-detail">'+sched+'</div>'+
+        (t.enabled?'<div class="timer-countdown '+cc+'">'+ct+cb+'</div>':
+        '<div style="color:var(--muted);font-size:12px;">Enable this timer in Schedule Relay Timers to activate it.</div>')+
+        '</div>';
+      list.appendChild(card);
+    });
+  }).catch(function(){});
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  fetch('/FeatureFlags.json').then(function(r){return r.json();}).then(function(f){
+    applyFlags(f);
+    // Stagger the initial burst so at most 1-2 TCP connections open at a time.
+    // Firing 6+ fetches simultaneously caused 6 concurrent lwIP allocations that
+    // fragmented the heap and permanently reduced the largest free block by ~16 KB.
+    pollSensors();
+    setTimeout(pollTimers,  400);
+    setTimeout(pollNetwork, 800);
+    setTimeout(function(){ pollADS(); pollWFS(); pollPressure(); }, 1200);
+    setInterval(pollSensors,2000);setInterval(pollADS,1000);setInterval(pollWFS,1000);
+    setInterval(pollPressure,2000);setInterval(pollNetwork,10000);setInterval(pollTimers,5000);
+  });
+  setTimeout(loadSystemInfo, 200);setInterval(loadSystemInfo,30000);
+});
+</script>
+</body>
+</html>

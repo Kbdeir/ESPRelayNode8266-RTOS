@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Manager</title>
+<style>
+:root{--page:#edf1f5;--ink:#152033;--muted:#687589;--panel:#fff;--panel-2:#f8fafc;--line:#d9e1ea;--field:#fdfefe;--teal:#0f766e;--teal-dark:#0a5f59;--blue:#2563eb;--amber:#b7791f;--amber-bg:#fffbeb;--amber-border:#fcd34d;--rose:#be123c;--green:#15803d;--slate:#475569;--shadow-sm:0 2px 8px rgba(21,32,51,.06);--shadow:0 18px 45px rgba(21,32,51,.12)}
+*{box-sizing:border-box}
+html{background:var(--page)}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.42;background:linear-gradient(180deg,#dfe9f3 0,#edf1f5 320px),var(--page)}
+.shell{width:min(980px,calc(100vw - 32px));margin:0 auto;padding:24px 0 36px}
+.topbar{position:relative;overflow:hidden;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:24px 26px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:linear-gradient(135deg,#152033,#103f49,#0f766e);box-shadow:var(--shadow)}
+.topbar h1{margin:0;font-size:28px;font-weight:700}
+.topbar .hint{margin-top:7px;color:#cfe0ea}
+.topbar .meta{min-width:200px;color:#e6eef5;font-size:13px;text-align:right;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:10px 12px}
+.fs-usage{margin-top:9px;text-align:left}
+.fs-usage .fs-label{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:#cfe0ea;margin-bottom:4px}
+.fs-usage .fs-bar{height:8px;border-radius:5px;background:rgba(255,255,255,.16);overflow:hidden}
+.fs-usage .fs-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,#2dd4bf,#0f766e);transition:width 240ms ease}
+.fs-usage .fs-fill.warn{background:linear-gradient(90deg,#fbbf24,#b7791f)}
+.fs-usage .fs-fill.crit{background:linear-gradient(90deg,#fb7185,#be123c)}
+.back-link{color:#a8d8cf;font-size:13px;text-decoration:none;white-space:nowrap;margin-top:6px;display:inline-block}
+.back-link:hover{color:#fff}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow-sm);padding:18px;margin-top:16px}
+.card h2{position:relative;display:flex;align-items:center;gap:10px;margin:-2px 0 16px;padding-bottom:12px;color:var(--ink);border-bottom:1px solid var(--line);font-size:18px;font-weight:700}
+.card h2::before{content:"";width:10px;height:28px;border-radius:6px;background:var(--teal);flex:0 0 auto}
+.card.danger h2::before{background:var(--rose)}
+.hint-text{color:var(--muted);font-size:13px;margin:0 0 12px}
+.warn-box{display:flex;gap:10px;background:var(--amber-bg);border:1px solid var(--amber-border);border-radius:8px;padding:12px 14px;font-size:13px;color:#78350f;line-height:1.5;margin-bottom:14px}
+.warn-icon{font-size:18px;flex-shrink:0;line-height:1.3}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.04em}
+tr:last-child td{border-bottom:none}
+td.fname{font-family:Consolas,Menlo,monospace;word-break:break-all}
+td.fsize{color:var(--muted);white-space:nowrap}
+th.tcheck,td.tcheck{width:34px;text-align:center;padding:8px 6px}
+input[type="checkbox"]{width:17px;height:17px;accent-color:var(--teal);cursor:pointer}
+.link-btn{background:none;border:none;box-shadow:none;border-radius:0;min-height:0;padding:0;margin:0;font:inherit;font-size:13px;font-weight:400;font-family:Consolas,Menlo,monospace;word-break:break-all;text-align:left;color:var(--blue);text-decoration:underline;cursor:pointer}
+.link-btn:hover{background:none;box-shadow:none;transform:none;color:var(--teal-dark)}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:12px}
+.toolbar .sel-count{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
+.toolbar .toolbar-actions{display:flex;flex-wrap:wrap;gap:8px}
+.row-btn{min-height:32px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:6px 12px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
+.row-btn:hover:not(:disabled){background:#eef3f8}
+.row-btn:disabled{opacity:.4;cursor:not-allowed}
+.row-btn.danger{color:var(--rose);border-color:#f3c6d1}
+.row-btn.danger:hover:not(:disabled){background:#fdf1f4}
+.empty-row td{color:var(--muted);text-align:center;padding:18px}
+.btn-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px}
+button,.button-link{min-height:38px;border:1px solid transparent;border-radius:8px;background:var(--teal);color:#fff;padding:8px 16px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;box-shadow:0 4px 12px rgba(15,118,110,.2);transition:transform 120ms,box-shadow 120ms,background 120ms}
+button:hover,.button-link:hover{background:var(--teal-dark);box-shadow:0 6px 16px rgba(15,118,110,.28);transform:translateY(-1px)}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-secondary{background:var(--slate)!important;box-shadow:0 4px 12px rgba(71,85,105,.2)!important}
+.btn-danger{background:var(--rose)!important;box-shadow:0 4px 12px rgba(190,18,60,.2)!important}
+input[type="text"],input[type="file"]{min-height:38px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--field);font:inherit;font-size:13px;width:100%}
+input[type="file"]{border:1px dashed #aab7c6;background:var(--panel-2);padding:8px}
+.field-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.field-row label{font-weight:700;font-size:13px;white-space:nowrap}
+.field-row input{flex:1;min-width:180px}
+.status-msg{margin-top:12px;font-size:13px;font-weight:700}
+.status-msg.ok{color:var(--green)}
+.status-msg.bad{color:var(--rose)}
+textarea{width:100%;min-height:360px;border:1px solid var(--line);border-radius:8px;background:var(--field);font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.5;padding:12px;resize:vertical}
+.editor{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.editor.visible{display:block}
+.editor h3{margin:0 0 10px;font-size:14px;font-weight:700;font-family:Consolas,Menlo,monospace;word-break:break-all}
+@media(max-width:640px){.topbar{grid-template-columns:1fr}.topbar .meta{min-width:0;text-align:left}.toolbar{flex-direction:column;align-items:stretch}.toolbar .toolbar-actions{justify-content:stretch}.toolbar .toolbar-actions .row-btn{flex:1}}
+.gzip-opt{display:none;flex-direction:column;margin:10px 0 4px;padding:9px 11px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;font-size:13px}
+.gzip-opt.visible{display:flex}
+.gzip-opt .gzip-row{display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:700}
+.gzip-opt input[type="checkbox"]{width:16px;height:16px;accent-color:var(--teal);cursor:pointer;flex:0 0 auto}
+.gzip-opt input[type="checkbox"]:disabled{opacity:.4;cursor:not-allowed}
+.gzip-opt input[type="checkbox"]:disabled ~ span{opacity:.55;cursor:not-allowed}
+.gzip-opt .gzip-sub{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4}
+.gzip-opt .gzip-sub.warn{color:var(--amber)}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div>
+      <h1>File Manager</h1>
+      <div class="hint">Inspect, edit, upload, rename and delete any file stored on this board's filesystem.</div>
+    </div>
+    <div class="meta">
+      <div><span id="file-count">&mdash;</span> file(s)</div>
+      <div class="fs-usage">
+        <div class="fs-label"><span id="fs-usage-text">Storage: &mdash;</span><span id="fs-usage-pct">&mdash;</span></div>
+        <div class="fs-bar"><div class="fs-fill" id="fs-fill" style="width:0%"></div></div>
+      </div>
+      <a class="back-link" href="/">&#8592; Back to Config</a>
+    </div>
+  </header>
+
+  <div class="card danger">
+    <div class="warn-box">
+      <span class="warn-icon">&#9888;</span>
+      <span>These files drive the firmware directly &mdash; editing, renaming, replacing or deleting the wrong one (especially <code>.json</code> config files or on-board web pages) can make the device misbehave or become unreachable until you restore from a backup. Changes here take effect immediately and are not reversible from this page.</span>
+    </div>
+
+    <div class="field-row">
+      <label for="file-filter">Filter</label>
+      <input type="text" id="file-filter" placeholder="Filter by name or extension, e.g. .json or relay">
+    </div>
+
+    <div class="toolbar">
+      <span class="sel-count" id="sel-count">0 selected</span>
+      <div class="toolbar-actions">
+        <button class="row-btn" id="btn-download-sel" disabled>&#8595; Download</button>
+        <button class="row-btn" id="btn-rename-sel" disabled title="Select exactly one file to rename">Rename</button>
+        <button class="row-btn danger" id="btn-delete-sel" disabled>Delete</button>
+      </div>
+    </div>
+
+    <table>
+      <thead><tr><th class="tcheck"><input type="checkbox" id="chk-select-all" title="Select all"></th><th>Name</th><th>Size</th></tr></thead>
+      <tbody id="file-rows">
+        <tr class="empty-row"><td colspan="3" style="color:red">Loading…</td></tr>
+      </tbody>
+    </table>
+    <p class="hint-text" style="margin:10px 0 0">Tap a filename to view or edit it. Use the checkboxes to select one or more files for the actions above.</p>
+
+    <div class="editor" id="editor">
+      <h3 id="editor-name">&mdash;</h3>
+      <textarea id="editor-content" spellcheck="false"></textarea>
+      <div class="btn-row">
+        <button id="btn-save">&#128190; Save</button>
+        <button class="btn-secondary" id="btn-cancel-edit">Cancel</button>
+        <span class="status-msg" id="editor-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Upload File</h2>
+    <p class="hint-text">Upload one or more files to this board. Select multiple files to upload them in sequence. Existing files at the same path will be overwritten.</p>
+    <div class="field-row">
+      <label for="upload-path">Save as path</label>
+      <input type="text" id="upload-path" placeholder="/example.json">
+    </div>
+    <input type="file" id="upload-file" multiple>
+    <div class="gzip-opt" id="upload-gzip-row">
+      <label class="gzip-row"><input type="checkbox" id="upload-gzip">&nbsp;Compress with gzip before upload</label>
+      <span class="gzip-sub">Shrinks HTML/CSS/JS by ~70%. The device serves <code>.gz</code> files transparently — browsers decompress automatically. Any existing uncompressed version of the file will be deleted after upload.</span>
+    </div>
+    <div class="btn-row">
+      <button id="btn-upload" disabled>&#8593; Upload</button>
+      <span class="status-msg" id="upload-status"></span>
+    </div>
+  </div>
+
+</main>
+
+<script>
+var currentPath = null;
+
+function setText(id, text) {
+  var e = document.getElementById(id);
+  if (e) e.textContent = text;
+}
+
+function humanSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function showStatus(id, ok, msg) {
+  var e = document.getElementById(id);
+  e.textContent = msg;
+  e.className = 'status-msg' + (ok === true ? ' ok' : ok === false ? ' bad' : '');
+}
+
+function postForm(url, fields) {
+  var body = Object.keys(fields).map(function(k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(fields[k]);
+  }).join('&');
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body
+  }).then(function(r){ return r.json(); });
+}
+
+function closeEditor() {
+  currentPath = null;
+  document.getElementById('editor').classList.remove('visible');
+  document.getElementById('editor-content').value = '';
+  showStatus('editor-status', null, '');
+}
+
+function openEditor(path) {
+  currentPath = path;
+  setText('editor-name', path);
+  document.getElementById('editor-content').value = 'Loading…';
+  document.getElementById('editor').classList.add('visible');
+  showStatus('editor-status', null, '');
+  document.getElementById('editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  fetch('/api/files/content?path=' + encodeURIComponent(path), { credentials: 'same-origin' })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    })
+    .then(function(text) {
+      if (currentPath !== path) return; // user picked another file meanwhile
+      document.getElementById('editor-content').value = text;
+    })
+    .catch(function() {
+      if (currentPath !== path) return;
+      document.getElementById('editor-content').value = '';
+      showStatus('editor-status', false, 'Could not load this file.');
+    });
+}
+
+document.getElementById('btn-cancel-edit').addEventListener('click', closeEditor);
+
+document.getElementById('btn-save').addEventListener('click', function() {
+  if (!currentPath) return;
+  if (!window.confirm('Save changes to ' + currentPath + ' on the device now?\n\nThis takes effect immediately.')) return;
+
+  var btn = this;
+  btn.disabled = true;
+  showStatus('editor-status', null, 'Saving…');
+
+  fetch('/api/files/content?path=' + encodeURIComponent(currentPath), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'text/plain' },
+    body: document.getElementById('editor-content').value
+  })
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      btn.disabled = false;
+      showStatus('editor-status', !!(d && d.ok), (d && d.message) ? d.message : 'Save failed.');
+      if (d && d.ok) loadFileList();
+    })
+    .catch(function() {
+      btn.disabled = false;
+      showStatus('editor-status', false, 'Save failed — could not reach the device.');
+    });
+});
+
+// ── Selection state — drives the toolbar (Download / Rename / Delete) ──
+var selectedPaths = [];
+
+function isSelected(name) { return selectedPaths.indexOf(name) >= 0; }
+
+function toggleSelect(name, checked) {
+  var idx = selectedPaths.indexOf(name);
+  if (checked && idx < 0) selectedPaths.push(name);
+  else if (!checked && idx >= 0) selectedPaths.splice(idx, 1);
+  updateToolbar();
+  syncSelectAllCheckbox();
+}
+
+function updateToolbar() {
+  var n = selectedPaths.length;
+  setText('sel-count', n + ' selected');
+  document.getElementById('btn-download-sel').disabled = n === 0;
+  document.getElementById('btn-rename-sel').disabled = n !== 1;
+  document.getElementById('btn-delete-sel').disabled = n === 0;
+}
+
+// "Select all" only ever acts on the currently filtered/visible rows — picking
+// it shouldn't silently sweep up files hidden by the active filter.
+function visibleFiles() {
+  var filter = document.getElementById('file-filter').value.trim();
+  return allFiles.filter(function(f){ return fileMatchesFilter(f.name, filter); });
+}
+
+function syncSelectAllCheckbox() {
+  var all = document.getElementById('chk-select-all');
+  var visible = visibleFiles();
+  if (visible.length === 0) { all.checked = false; all.indeterminate = false; return; }
+  var selVisible = visible.filter(function(f){ return isSelected(f.name); }).length;
+  all.checked = selVisible === visible.length;
+  all.indeterminate = selVisible > 0 && selVisible < visible.length;
+}
+
+document.getElementById('chk-select-all').addEventListener('change', function() {
+  var checked = this.checked;
+  visibleFiles().forEach(function(f) {
+    var idx = selectedPaths.indexOf(f.name);
+    if (checked && idx < 0) selectedPaths.push(f.name);
+    else if (!checked && idx >= 0) selectedPaths.splice(idx, 1);
+  });
+  renderFileList();
+});
+
+// ── Toolbar actions — operate on the current selection ──
+
+// Triggers a same-origin, authenticated fetch-as-blob + synthetic <a download>
+// for each selected file in turn (sequential — most browsers throttle/block a
+// burst of simultaneous programmatic downloads from one click).
+function downloadFiles(paths) {
+  var btn = document.getElementById('btn-download-sel');
+  btn.disabled = true;
+  var failed = [];
+  function next(i) {
+    if (i >= paths.length) {
+      btn.disabled = selectedPaths.length === 0;
+      if (failed.length) window.alert('Could not download:\n' + failed.join('\n'));
+      return;
+    }
+    var path = paths[i];
+    fetch('/api/files/content?path=' + encodeURIComponent(path), { credentials: 'same-origin' })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = path.replace(/^\//, '') || 'file';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+      })
+      .catch(function() { failed.push(path); })
+      .then(function() { setTimeout(function(){ next(i + 1); }, 250); });
+  }
+  next(0);
+}
+
+document.getElementById('btn-download-sel').addEventListener('click', function() {
+  if (selectedPaths.length) downloadFiles(selectedPaths.slice());
+});
+
+function renameFile(path) {
+  var to = window.prompt('Rename ' + path + ' to:', path);
+  if (to === null || to === path) return;
+  postForm('/api/files/rename', { from: path, to: to })
+    .then(function(d) {
+      if (!d || !d.ok) { window.alert((d && d.message) ? d.message : 'Rename failed.'); return; }
+      if (currentPath === path) closeEditor();
+      loadFileList();
+    })
+    .catch(function() { window.alert('Rename failed — could not reach the device.'); });
+}
+
+document.getElementById('btn-rename-sel').addEventListener('click', function() {
+  if (selectedPaths.length === 1) renameFile(selectedPaths[0]);
+});
+
+function deleteFiles(paths) {
+  var msg = paths.length === 1
+    ? ('Permanently delete ' + paths[0] + ' from the device?')
+    : ('Permanently delete these ' + paths.length + ' files from the device?\n\n' + paths.join('\n'));
+  msg += '\n\nThis cannot be undone.';
+  if (!window.confirm(msg)) return;
+
+  var btn = document.getElementById('btn-delete-sel');
+  btn.disabled = true;
+  var failed = [];
+  function next(i) {
+    if (i >= paths.length) {
+      if (failed.length) window.alert('Could not delete:\n' + failed.join('\n'));
+      loadFileList();
+      return;
+    }
+    var path = paths[i];
+    postForm('/api/files/delete', { path: path })
+      .then(function(d) {
+        if (!d || !d.ok) failed.push(path);
+        if (currentPath === path) closeEditor();
+      })
+      .catch(function() { failed.push(path); })
+      .then(function() { next(i + 1); });
+  }
+  next(0);
+}
+
+document.getElementById('btn-delete-sel').addEventListener('click', function() {
+  if (selectedPaths.length) deleteFiles(selectedPaths.slice());
+});
+
+var allFiles = [];
+
+// Matches if the filter is a bare extension (e.g. ".json") against the
+// filename's extension, or otherwise as a case-insensitive substring of the
+// filename — covers both "show me all configs" and "find that one file".
+function fileMatchesFilter(name, filter) {
+  if (!filter) return true;
+  var f = filter.toLowerCase();
+  var n = name.toLowerCase();
+  if (f.charAt(0) === '.') return n.slice(n.lastIndexOf('.')) === f || n.endsWith(f);
+  return n.indexOf(f) >= 0;
+}
+
+function renderFileList() {
+  // Drop any selected names that no longer exist (deleted/renamed elsewhere).
+  selectedPaths = selectedPaths.filter(function(name) {
+    return allFiles.some(function(f){ return f.name === name; });
+  });
+
+  var list = visibleFiles();
+  var rows = document.getElementById('file-rows');
+  rows.innerHTML = '';
+
+  setText('file-count', allFiles.length ? (list.length + ' / ' + allFiles.length) : '0');
+
+  if (allFiles.length === 0) {
+    rows.innerHTML = '<tr class="empty-row"><td colspan="3">No files found.</td></tr>';
+  } else if (list.length === 0) {
+    rows.innerHTML = '<tr class="empty-row"><td colspan="3">No files match this filter.</td></tr>';
+  } else {
+    list.forEach(function(f) {
+      var tr = document.createElement('tr');
+
+      var tdCheck = document.createElement('td');
+      tdCheck.className = 'tcheck';
+      var chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.checked = isSelected(f.name);
+      chk.addEventListener('change', (function(name){ return function(){ toggleSelect(name, this.checked); }; })(f.name));
+      tdCheck.appendChild(chk);
+      tr.appendChild(tdCheck);
+
+      var tdName = document.createElement('td');
+      tdName.className = 'fname';
+      var btnName = document.createElement('button');
+      btnName.type = 'button';
+      btnName.className = 'link-btn';
+      btnName.textContent = f.name;
+      btnName.title = 'View / edit ' + f.name;
+      btnName.addEventListener('click', (function(name){ return function(){ openEditor(name); }; })(f.name));
+      tdName.appendChild(btnName);
+      tr.appendChild(tdName);
+
+      var tdSize = document.createElement('td');
+      tdSize.className = 'fsize';
+      tdSize.textContent = humanSize(f.size || 0);
+      tr.appendChild(tdSize);
+
+      rows.appendChild(tr);
+    });
+  }
+
+  updateToolbar();
+  syncSelectAllCheckbox();
+}
+
+document.getElementById('file-filter').addEventListener('input', renderFileList);
+
+function renderFsUsage(total, used) {
+  var fill = document.getElementById('fs-fill');
+  if (!total) {
+    setText('fs-usage-text', 'Storage: —');
+    setText('fs-usage-pct', '—');
+    fill.style.width = '0%';
+    fill.className = 'fs-fill';
+    return;
+  }
+  var pct = Math.min(100, Math.round((used / total) * 100));
+  setText('fs-usage-text', 'Storage: ' + humanSize(used) + ' / ' + humanSize(total));
+  setText('fs-usage-pct', pct + '%');
+  fill.style.width = pct + '%';
+  fill.className = 'fs-fill' + (pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '');
+}
+
+function loadFileList() {
+  console.log('[Files] fetching /api/files/list');
+  fetch('/api/files/list', { credentials: 'same-origin' })
+    .then(function(r) {
+      console.log('[Files] response status=' + r.status + ' type=' + r.type + ' ok=' + r.ok);
+      return r.text().then(function(body) {
+        console.log('[Files] raw body (' + body.length + ' chars):', body.substring(0, 300));
+        try {
+          return JSON.parse(body);
+        } catch(e) {
+          console.error('[Files] JSON.parse failed:', e.message);
+          throw e;
+        }
+      });
+    })
+    .then(function(data) {
+      var list = data && Array.isArray(data.files) ? data.files : [];
+      allFiles = list.filter(function(f){ return f && typeof f.name === 'string'; })
+                     .sort(function(a, b){ return a.name.localeCompare(b.name); });
+      renderFileList();
+      renderFsUsage(data && data.fsTotal || 0, data && data.fsUsed || 0);
+    })
+    .catch(function(err) {
+      console.error('[Files] loadFileList failed:', err);
+      allFiles = [];
+      document.getElementById('file-rows').innerHTML = '<tr class="empty-row"><td colspan="3">Could not load the file list.</td></tr>';
+      setText('file-count', '0');
+      renderFsUsage(0, 0);
+    });
+}
+
+var uploadFileInput = document.getElementById('upload-file');
+var uploadPathInput = document.getElementById('upload-path');
+var btnUpload = document.getElementById('btn-upload');
+
+var GZIP_SUB_NORMAL = 'Shrinks HTML/CSS/JS by ~70%. The device serves .gz files transparently to browsers. If the uncompressed version exists it will be removed after upload.';
+var GZIP_SUB_TOKENS = 'Cannot compress: this file uses server-side template tokens (%TOKEN%) that the ESP32 substitutes when serving the page. Gzip files are sent byte-for-byte, bypassing substitution — dynamic values would not appear.';
+
+uploadFileInput.addEventListener('change', function() {
+  var files = this.files;
+  var count = files ? files.length : 0;
+  btnUpload.disabled = count === 0;
+  var gzipRow = document.getElementById('upload-gzip-row');
+  var gzipCb  = document.getElementById('upload-gzip');
+  var gzipSub = gzipRow ? gzipRow.querySelector('.gzip-sub') : null;
+
+  if (count > 1) {
+    uploadPathInput.value = '';
+    uploadPathInput.disabled = true;
+    uploadPathInput.placeholder = count + ' files — HTML/CSS/JS without tokens auto-gzipped';
+    if (gzipRow) gzipRow.className = 'gzip-opt';
+    if (gzipCb) { gzipCb.checked = false; gzipCb.disabled = true; }
+    return;
+  }
+
+  uploadPathInput.disabled = false;
+  uploadPathInput.placeholder = '/example.json';
+  if (gzipCb) gzipCb.disabled = false;
+
+  var f = count === 1 ? files[0] : null;
+  if (f) uploadPathInput.value = '/' + f.name;
+
+  var canGzip = !!window.CompressionStream && f && /\.(html|css|js)$/i.test(f.name);
+  if (gzipRow) gzipRow.className = 'gzip-opt' + (canGzip ? ' visible' : '');
+  if (!canGzip) {
+    if (gzipCb) { gzipCb.checked = false; gzipCb.disabled = false; }
+    if (gzipSub) { gzipSub.textContent = GZIP_SUB_NORMAL; gzipSub.className = 'gzip-sub'; }
+    var p = uploadPathInput.value;
+    if (p.endsWith('.gz')) uploadPathInput.value = p.slice(0, -3);
+    return;
+  }
+  var reader = new FileReader();
+  reader.onload = function(ev) {
+    var hasTokens = /%[A-Z_][A-Z_0-9]*%/.test(ev.target.result);
+    if (gzipCb) { gzipCb.disabled = hasTokens; if (hasTokens) gzipCb.checked = false; }
+    if (gzipSub) {
+      gzipSub.textContent = hasTokens ? GZIP_SUB_TOKENS : GZIP_SUB_NORMAL;
+      gzipSub.className = 'gzip-sub' + (hasTokens ? ' warn' : '');
+    }
+    if (hasTokens) {
+      var p2 = uploadPathInput.value;
+      if (p2.endsWith('.gz')) uploadPathInput.value = p2.slice(0, -3);
+    }
+  };
+  reader.readAsText(f);
+});
+
+document.getElementById('upload-gzip').addEventListener('change', function() {
+  var p = uploadPathInput.value;
+  if (this.checked) {
+    if (!p.endsWith('.gz')) uploadPathInput.value = p + '.gz';
+  } else {
+    if (p.endsWith('.gz')) uploadPathInput.value = p.slice(0, -3);
+  }
+});
+
+btnUpload.addEventListener('click', function() {
+  var files = uploadFileInput.files;
+  if (!files || !files.length) return;
+  var btn = this;
+
+  if (files.length > 1) {
+    var fileArr = Array.prototype.slice.call(files);
+    var msg = 'Upload ' + fileArr.length + ' files to the device?\n\n'
+      + fileArr.map(function(f){ return '  /' + f.name; }).join('\n')
+      + '\n\nExisting files at those paths will be overwritten.';
+    if (!window.confirm(msg)) return;
+    btn.disabled = true;
+    var failed = [];
+    function finishMulti() {
+      btn.disabled = false;
+      uploadFileInput.value = '';
+      uploadPathInput.disabled = false;
+      uploadPathInput.placeholder = '/example.json';
+      var gzipCbR = document.getElementById('upload-gzip');
+      if (gzipCbR) gzipCbR.disabled = false;
+      if (failed.length) {
+        showStatus('upload-status', false, 'Failed (' + failed.length + '): ' + failed.join(', '));
+      } else {
+        showStatus('upload-status', true, fileArr.length + ' files uploaded.');
+        loadFileList();
+      }
+    }
+    function uploadNext(i) {
+      if (i >= fileArr.length) { finishMulti(); return; }
+      var f = fileArr[i];
+      var label = (i + 1) + ' of ' + fileArr.length;
+      var canGzip = !!window.CompressionStream && /\.(html|css|js)$/i.test(f.name);
+
+      function doRaw() {
+        showStatus('upload-status', null, 'Uploading ' + label + ': ' + f.name + '…');
+        fetch('/api/files/content?path=' + encodeURIComponent('/' + f.name), {
+          method: 'POST', credentials: 'same-origin', body: f
+        })
+          .then(function(r){ return r.json(); })
+          .then(function(d){ if (!(d && d.ok)) failed.push(f.name); })
+          .catch(function(){ failed.push(f.name); })
+          .then(function(){ uploadNext(i + 1); });
+      }
+
+      if (!canGzip) { doRaw(); return; }
+
+      showStatus('upload-status', null, 'Checking ' + label + ': ' + f.name + '…');
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        if (/%[A-Z_][A-Z_0-9]*%/.test(ev.target.result)) { doRaw(); return; }
+        var gzPath = '/' + f.name + '.gz';
+        var uncompPath = '/' + f.name;
+        var uncompExists = allFiles.some(function(fi){ return fi.name === uncompPath; });
+        showStatus('upload-status', null, 'Compressing ' + label + ': ' + f.name + '…');
+        new Response(f.stream().pipeThrough(new CompressionStream('gzip'))).blob()
+          .then(function(blob) {
+            showStatus('upload-status', null, 'Uploading ' + label + ': ' + f.name + '.gz…');
+            return fetch('/api/files/content?path=' + encodeURIComponent(gzPath), {
+              method: 'POST', credentials: 'same-origin', body: blob
+            }).then(function(r){ return r.json(); });
+          })
+          .then(function(d) {
+            if (!(d && d.ok)) { failed.push(f.name); return; }
+            if (uncompExists) return postForm('/api/files/delete', { path: uncompPath }).catch(function(){});
+          })
+          .catch(function(){ failed.push(f.name); })
+          .then(function(){ uploadNext(i + 1); });
+      };
+      reader.readAsText(f);
+    }
+    uploadNext(0);
+    return;
+  }
+
+  var f = files[0];
+  var path = uploadPathInput.value.trim();
+  if (!path.startsWith('/') || path.indexOf('..') >= 0 || path.length < 2) {
+    showStatus('upload-status', false, 'Enter a valid absolute path, e.g. /example.json');
+    return;
+  }
+
+  var gzipCb  = document.getElementById('upload-gzip');
+  var doGzip  = !!(gzipCb && gzipCb.checked && window.CompressionStream);
+  var uncompPath   = doGzip && path.endsWith('.gz') ? path.slice(0, -3) : null;
+  var uncompExists = uncompPath && allFiles.some(function(fi){ return fi.name === uncompPath; });
+
+  var msg = 'Upload "' + f.name + '"' + (doGzip ? ' (gzip compressed)' : '') + ' to ' + path + ' on the device?';
+  msg += '\n\nIf a file already exists at that path it will be overwritten immediately.';
+  if (uncompExists) msg += '\n\nThe uncompressed version (' + uncompPath + ') will also be deleted.';
+  if (!window.confirm(msg)) return;
+
+  btn.disabled = true;
+
+  function resetForm() {
+    uploadFileInput.value = '';
+    uploadPathInput.value = '';
+    btn.disabled = true;
+    if (gzipCb) gzipCb.checked = false;
+    var gr = document.getElementById('upload-gzip-row');
+    if (gr) gr.className = 'gzip-opt';
+  }
+
+  function finishUpload(d) {
+    if (d && d.ok) {
+      resetForm();
+      if (uncompExists) {
+        showStatus('upload-status', null, 'Removing uncompressed version…');
+        postForm('/api/files/delete', { path: uncompPath })
+          .then(function(){ showStatus('upload-status', true, 'Uploaded and compressed. Uncompressed version removed.'); })
+          .catch(function(){ showStatus('upload-status', true, 'Uploaded. Delete ' + uncompPath + ' manually to avoid serving the old version.'); })
+          .then(function(){ loadFileList(); });
+      } else {
+        showStatus('upload-status', true, (d.message) ? d.message : 'Uploaded successfully.');
+        loadFileList();
+      }
+    } else {
+      btn.disabled = false;
+      showStatus('upload-status', false, (d && d.message) ? d.message : 'Upload failed.');
+    }
+  }
+
+  function doUpload(body) {
+    showStatus('upload-status', null, 'Uploading…');
+    fetch('/api/files/content?path=' + encodeURIComponent(path), {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: body
+    })
+      .then(function(r){ return r.json(); })
+      .then(finishUpload)
+      .catch(function() {
+        btn.disabled = false;
+        showStatus('upload-status', false, 'Upload failed — could not reach the device.');
+      });
+  }
+
+  if (doGzip) {
+    showStatus('upload-status', null, 'Compressing…');
+    new Response(f.stream().pipeThrough(new CompressionStream('gzip'))).blob()
+      .then(function(blob){ doUpload(blob); })
+      .catch(function(e){ btn.disabled = false; showStatus('upload-status', false, 'Compression failed: ' + (e.message || e)); });
+  } else {
+    doUpload(f);
+  }
+});
+
+loadFileList();
+</script>
+</body>
+</html>

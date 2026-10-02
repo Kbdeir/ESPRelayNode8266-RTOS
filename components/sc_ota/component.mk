@@ -1,0 +1,2 @@
+COMPONENT_ADD_INCLUDEDIRS := include
+COMPONENT_REQUIRES := app_update esp8266
