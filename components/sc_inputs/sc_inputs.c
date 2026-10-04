@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +37,20 @@ static void publish_input(const input_runtime_t *input, const char *payload)
         sc_mqtt_publish(input->config.topic, payload, true);
 }
 
+static void publish_input_state(const input_runtime_t *input, bool level)
+{
+    char topic[SC_TOPIC_LEN];
+    int n;
+    if (!input->config.topic[0]) return;
+    n = snprintf(topic, sizeof(topic), "%s/State", input->config.topic);
+    if (n <= 0 || n >= (int)sizeof(topic)) {
+        ESP_LOGW(TAG, "state topic too long for GPIO %u",
+                 (unsigned)input->config.gpio);
+        return;
+    }
+    sc_mqtt_publish(topic, level ? "on" : "off", true);
+}
+
 static void relay_command(const input_runtime_t *input, sc_relay_op_t op, bool value)
 {
     if (input->config.relay < 0 || input->config.relay >= sc_relay_count()) return;
@@ -50,6 +65,7 @@ static void relay_command(const input_runtime_t *input, sc_relay_op_t op, bool v
 
 static void input_changed(input_runtime_t *input, bool level)
 {
+    publish_input_state(input, level);
     switch ((sc_input_mode_t)input->config.mode) {
     case SC_INPUT_MQTT_TOGGLE:
         if (!level) publish_input(input, "tog");
@@ -89,19 +105,21 @@ void sc_inputs_poll(void)
         }
     }
     if (now - mqtt_checked_at >= pdMS_TO_TICKS(1000)) {
-        sc_mqtt_status_t mqtt;
+        bool mqtt_connected = sc_mqtt_connected();
         mqtt_checked_at = now;
-        sc_mqtt_status(&mqtt);
-        if (mqtt.connected && !mqtt_was_connected) {
+        if (mqtt_connected && !mqtt_was_connected) {
             for (uint8_t i = 0; i < input_count; i++) {
                 input_runtime_t *input = &inputs[i];
+                if (input->configured) {
+                    publish_input_state(input, input->stable);
+                }
                 if (input->configured &&
                     (input->config.mode == SC_INPUT_MQTT_STATE ||
                      input->config.mode == SC_INPUT_COPY_TO_RELAY))
                     publish_input(input, input->stable ? "on" : "off");
             }
         }
-        mqtt_was_connected = mqtt.connected;
+        mqtt_was_connected = mqtt_connected;
     }
 }
 
@@ -120,8 +138,7 @@ esp_err_t sc_inputs_init(void)
 
     for (uint8_t i = 0; i < input_count; i++) {
         input_runtime_t *input = &inputs[i];
-        if (input->config.mode == SC_INPUT_NONE ||
-            input->config.mode == SC_INPUT_TEMPERATURE) continue;
+        if (input->config.mode == SC_INPUT_TEMPERATURE) continue;
         if (input->config.mode > SC_INPUT_COPY_TO_RELAY) {
             ESP_LOGW(TAG, "input %u has invalid mode %u", (unsigned)i,
                      (unsigned)input->config.mode);

@@ -17,6 +17,8 @@ static SemaphoreHandle_t state_lock;
 static TimerHandle_t retry;
 static uint32_t retry_ms = 1000;
 static const char *TAG = "wifi";
+__attribute__((weak)) void sc_mqtt_network_ready(void) {}
+__attribute__((weak)) void sc_mqtt_network_down(void) {}
 
 static void copy_field(uint8_t *dst, size_t cap, const char *src)
 {
@@ -76,7 +78,9 @@ static esp_err_t evt(void *ctx, system_event_t *event)
         retry_ms = 1000;
         xTimerStop(retry, 0);
         sc_status_led_set_mode(SC_STATUS_LED_CONNECTED);
+        sc_mqtt_network_ready();
     } else if (event->event_id == SYSTEM_EVENT_STA_DISCONNECTED) {
+        sc_mqtt_network_down();
         if (xSemaphoreTake(state_lock, portMAX_DELAY) == pdTRUE) {
             st.connected = false;
             st.ip[0] = 0;

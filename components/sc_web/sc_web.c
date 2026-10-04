@@ -25,6 +25,7 @@
 #include "sc_diag.h"
 #include "sc_ota.h"
 #include "sc_ha.h"
+#include "sc_automation.h"
 #include "sc_web.h"
 
 #define httpd_resp_sendstr(req, str) httpd_resp_send((req), (str), -1)
@@ -61,6 +62,7 @@ static size_t b64_encode(const uint8_t *src, size_t len, char *out) {
 
 static void reboot_task(void*p){(void)p;vTaskDelay(pdMS_TO_TICKS(1000));esp_restart();}
 static void schedule_reboot(void){if(xTaskCreate(reboot_task,"config_reboot",1024,NULL,2,NULL)!=pdPASS)esp_restart();}
+static esp_err_t restart_device(httpd_req_t*r){httpd_resp_set_type(r,"application/json");esp_err_t e=httpd_resp_sendstr(r,"{\"ok\":true,\"message\":\"Restarting\"}");schedule_reboot();return e;}
 static esp_err_t send_error(httpd_req_t*r,const char*status,const char*msg){httpd_resp_set_status(r,status);httpd_resp_set_type(r,"text/plain");return httpd_resp_sendstr(r,msg?msg:"error");}
 static bool request_authorized(httpd_req_t *r) {
   char user[SC_USER_LEN], password[SC_PASS_LEN];
@@ -108,12 +110,13 @@ static esp_err_t js(httpd_req_t*r,cJSON*j){char*s=cJSON_PrintUnformatted(j);http
 static int hex_value(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
 static void form_url_decode(char*s){char*read=s,*write=s;while(*read){if(*read=='+'){*write++=' ';read++;continue;}if(*read=='%'&&read[1]&&read[2]){int high=hex_value(read[1]),low=hex_value(read[2]);if(high>=0&&low>=0){*write++=(char)((high<<4)|low);read+=3;continue;}}*write++=*read++;}*write=0;}
 static void qstr(const char*q,const char*key,char*dst,size_t cap){char t[320];if(httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK){form_url_decode(t);snprintf(dst,cap,"%s",t);}}static int qint(const char*q,const char*key,int cur){char t[24];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?atoi(t):cur;}static uint32_t qu32(const char*q,const char*key,uint32_t cur){char t[24],*end=NULL;if(httpd_query_key_value(q,key,t,sizeof(t))!=ESP_OK)return cur;if(t[0]=='-')return 0;unsigned long long value=strtoull(t,&end,10);if(!t[0]||!end||*end)return cur;return value>UINT32_MAX?UINT32_MAX:(uint32_t)value;}static float qfloat(const char*q,const char*key,float cur){char t[32];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?(float)atof(t):cur;}
+static bool qcondition_value(const char*q,const char*key,float*out){char t[32];if(!out||httpd_query_key_value(q,key,t,sizeof(t))!=ESP_OK)return false;form_url_decode(t);char*start=t;while(isspace((unsigned char)*start))start++;char*last=start+strlen(start);while(last>start&&isspace((unsigned char)last[-1]))*--last=0;if(!strcasecmp(start,"on")||!strcasecmp(start,"true")||!strcasecmp(start,"yes")){*out=1.0f;return true;}if(!strcasecmp(start,"off")||!strcasecmp(start,"false")||!strcasecmp(start,"no")){*out=0.0f;return true;}char*end=NULL;float value=strtof(start,&end);if(!start[0]||end==start||*end||!isfinite(value))return false;*out=value;return true;}
 static bool query_has(const char*q,const char*key);
 static bool valid_publish_topic(const char *topic) {
   return topic && topic[0] && strlen(topic) < SC_TOPIC_LEN &&
          !strchr(topic, '#') && !strchr(topic, '+');
 }
-static bool safe_path(const char*p){return p&&p[0]=='/'&&!strstr(p,"..")&&strlen(p)<SC_LFS_NAME_MAX;}
+static bool safe_path(const char*p){return p&&p[0]=='/'&&p[1]!='.'&&!strstr(p,"..")&&strlen(p)<SC_LFS_NAME_MAX;}
 static esp_err_t recv_body(httpd_req_t*r,char*b,size_t cap){if(r->content_len<=0||r->content_len>=(int)cap){send_error(r,HTTPD_400,"invalid body size");return ESP_FAIL;}int got=0;while(got<r->content_len){int n=httpd_req_recv(r,b+got,r->content_len-got);if(n<=0)return ESP_FAIL;got+=n;}b[got]=0;return ESP_OK;}
 static void controller_id(char out[13]){uint8_t mac[6]={0};if(esp_wifi_get_mac(ESP_IF_WIFI_STA,mac)!=ESP_OK){snprintf(out,13,"ESP8266");return;}snprintf(out,13,"%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);}
 static void uptime_string(char*out,size_t cap){uint32_t sec=(uint32_t)(esp_timer_get_time()/1000000ULL);uint32_t days=sec/86400;sec%=86400;snprintf(out,cap,"%ud %02u:%02u:%02u",(unsigned)days,(unsigned)(sec/3600),(unsigned)((sec%3600)/60),(unsigned)(sec%60));}
@@ -203,6 +206,193 @@ static esp_err_t wireguard_status(httpd_req_t*r){return json_text(r,"{\"enabled\
 static esp_err_t relayctl(httpd_req_t*r){char q[128],v[16];int rn=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return send_error(r,HTTPD_400,"missing query");if(httpd_query_key_value(q,"relay",v,sizeof(v))==ESP_OK)rn=atoi(v);if(rn<0||rn>=sc_relay_count())return send_error(r,HTTPD_400,"invalid relay");if(httpd_query_key_value(q,"action",v,sizeof(v))!=ESP_OK&&httpd_query_key_value(q,"state",v,sizeof(v))!=ESP_OK)return send_error(r,HTTPD_400,"missing action");sc_relay_cmd_t c={.relay=rn};const char*accepted;if(!strcasecmp(v,"toggle")||!strcasecmp(v,"tog")){c.op=SC_RELAY_TOGGLE;accepted="TOGGLE";}else if(!strcasecmp(v,"on")||!strcmp(v,"1")){c.op=SC_RELAY_SET;c.value=true;accepted="ON";}else if(!strcasecmp(v,"off")||!strcmp(v,"0")){c.op=SC_RELAY_SET;c.value=false;accepted="OFF";}else return send_error(r,HTTPD_400,"invalid action");if(!sc_relay_submit(&c))return send_error(r,"503 Service Unavailable","queue full");httpd_resp_set_hdr(r,"Connection","close");cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",true);cJSON_AddNumberToObject(j,"relay",rn);cJSON_AddStringToObject(j,"accepted",accepted);cJSON_AddStringToObject(j,"state",sc_relay_get(rn)?"ON":"OFF");return js(r,j);}
 static esp_err_t relaystate(httpd_req_t*r){char q[64],v[8],body[160];int n=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK&&httpd_query_key_value(q,"relay",v,sizeof(v))==ESP_OK)n=atoi(v);sc_relay_status_t status;if(n<0||!sc_relay_status((uint8_t)n,&status))return json_text(r,"{\"relay\":-1,\"state\":\"NA\",\"ttlActive\":false,\"ttaActive\":false,\"ttlRemaining\":0,\"ttaRemaining\":0}");snprintf(body,sizeof(body),"{\"relay\":%d,\"state\":\"%s\",\"ttlActive\":%s,\"ttaActive\":%s,\"ttlRemaining\":%u,\"ttaRemaining\":%u}",n,status.state?"ON":"OFF",status.ttl_active?"true":"false",status.tta_active?"true":"false",(unsigned)status.ttl_remaining_sec,(unsigned)status.tta_remaining_sec);return json_text(r,body);}
 
+static bool automation_source_valid(int source)
+{
+  return source >= SC_AUTOMATION_SOURCE_NONE &&
+         (source <= SC_AUTOMATION_SOURCE_RELAY4 ||
+          (source >= SC_AUTOMATION_SOURCE_REMOTE1 &&
+           source <= SC_AUTOMATION_SOURCE_REMOTE8));
+}
+
+static esp_err_t automation_get(httpd_req_t *r)
+{
+  const sc_config_t *config = sc_config_acquire();
+  uint8_t relay_count = config->relay_count;
+  sc_config_release();
+  httpd_resp_set_type(r, "application/json");
+  httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(r, "Connection", "close");
+  char chunk[1024];
+  int n = snprintf(chunk, sizeof(chunk),
+                   "{\"relayCount\":%u,\"staleSeconds\":%u,\"rules\":[",
+                   (unsigned)relay_count, (unsigned)SC_REMOTE_STALE_SEC);
+  if (n < 0 || n >= (int)sizeof(chunk) ||
+      httpd_resp_send_chunk(r, chunk, n) != ESP_OK) return ESP_FAIL;
+  for (uint8_t i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
+    sc_automation_rule_t rule_value;
+    config = sc_config_acquire();
+    rule_value = config->automation[i];
+    sc_config_release();
+    const sc_automation_rule_t *rule = &rule_value;
+    sc_automation_status_t status;
+    sc_automation_status(i, &status);
+    n = snprintf(chunk, sizeof(chunk),
+      "%s{\"id\":%u,\"enabled\":%s,\"target\":%u,\"action\":%u,"
+      "\"logic\":%u,\"trigger\":%u,\"gate\":%u,\"hold\":%u,"
+      "\"cooldown\":%u,\"conditions\":[{\"source\":%u,\"op\":%u,"
+      "\"value1\":%.6g,\"value2\":%.6g},{\"source\":%u,\"op\":%u,"
+      "\"value1\":%.6g,\"value2\":%.6g}],\"status\":{"
+      "\"available\":%s,\"gateOpen\":%s,\"matched\":%s,"
+      "\"stableSeconds\":%u,\"secondsSinceFire\":%u}}",
+      i ? "," : "", (unsigned)(i + 1), rule->enabled ? "true" : "false",
+      (unsigned)rule->target_relay, (unsigned)rule->action,
+      (unsigned)rule->logic, (unsigned)rule->trigger_mode,
+      (unsigned)rule->gate_timer, (unsigned)rule->hold_sec,
+      (unsigned)rule->cooldown_sec,
+      (unsigned)rule->condition[0].source, (unsigned)rule->condition[0].op,
+      (double)rule->condition[0].value1, (double)rule->condition[0].value2,
+      (unsigned)rule->condition[1].source, (unsigned)rule->condition[1].op,
+      (double)rule->condition[1].value1, (double)rule->condition[1].value2,
+      status.source_available ? "true" : "false",
+      status.gate_open ? "true" : "false",
+      status.matched ? "true" : "false",
+      (unsigned)status.stable_sec, (unsigned)status.seconds_since_fire);
+    if (n < 0 || n >= (int)sizeof(chunk) ||
+        httpd_resp_send_chunk(r, chunk, n) != ESP_OK) return ESP_FAIL;
+  }
+  if (httpd_resp_send_chunk(r, "],\"remotes\":[", 13) != ESP_OK) return ESP_FAIL;
+  for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
+    sc_remote_sensor_config_t remote_config;
+    config = sc_config_acquire();
+    remote_config = config->remote_sensor[i];
+    sc_config_release();
+    sc_remote_sensor_status_t status;
+    sc_automation_remote_status(i, &status);
+    char topic[SC_REMOTE_TOPIC_LEN * 6 + 1];
+    char key[SC_REMOTE_KEY_LEN * 6 + 1];
+    char label[SC_REMOTE_LABEL_LEN * 6 + 1];
+    json_escape(topic, sizeof(topic), remote_config.topic);
+    json_escape(key, sizeof(key), remote_config.json_key);
+    json_escape(label, sizeof(label), remote_config.label);
+    n = snprintf(chunk, sizeof(chunk),
+      "%s{\"id\":%u,\"topic\":\"%s\",\"jsonKey\":\"%s\","
+      "\"label\":\"%s\",\"valid\":%s,\"value\":%.6g,\"age\":%u}",
+      i ? "," : "", (unsigned)(i + 1), topic, key, label,
+      status.valid ? "true" : "false", (double)status.value,
+      (unsigned)status.age_sec);
+    if (n < 0 || n >= (int)sizeof(chunk) ||
+        httpd_resp_send_chunk(r, chunk, n) != ESP_OK) return ESP_FAIL;
+  }
+  if (httpd_resp_send_chunk(r, "]}", 2) != ESP_OK) return ESP_FAIL;
+  return httpd_resp_send_chunk(r, NULL, 0);
+}
+
+static esp_err_t automation_reply(httpd_req_t *r, bool ok, const char *message)
+{
+  char body[192], escaped[128];
+  json_escape(escaped, sizeof(escaped), message);
+  snprintf(body, sizeof(body), "{\"ok\":%s,\"message\":\"%s\"}",
+           ok ? "true" : "false", escaped);
+  if (!ok) httpd_resp_set_status(r, HTTPD_400);
+  return json_text(r, body);
+}
+
+static esp_err_t automation_rule_save(httpd_req_t *r)
+{
+  char body[512];
+  if (recv_body(r, body, sizeof(body)) != ESP_OK) return ESP_FAIL;
+  int index = qint(body, "id", 0) - 1;
+  if (index < 0 || index >= SC_MAX_AUTOMATION_RULES)
+    return automation_reply(r, false, "Invalid rule slot");
+  sc_config_t c;
+  sc_config_snapshot(&c);
+  sc_automation_rule_t rule = {0};
+  rule.enabled = qint(body, "enabled", 0) != 0;
+  rule.target_relay = qint(body, "target", 0);
+  rule.action = qint(body, "action", 0);
+  rule.logic = qint(body, "logic", 0);
+  rule.trigger_mode = qint(body, "trigger", 0);
+  rule.gate_timer = qint(body, "gate", 0);
+  int hold = qint(body, "hold", 0), cooldown = qint(body, "cooldown", 0);
+  rule.hold_sec = hold < 0 ? 0 : hold > UINT16_MAX ? UINT16_MAX : hold;
+  rule.cooldown_sec = cooldown < 0 ? 0 : cooldown > UINT16_MAX ? UINT16_MAX : cooldown;
+  rule.condition[0].source = qint(body, "c0source", 0);
+  rule.condition[0].op = qint(body, "c0op", 0);
+  bool values_ok = qcondition_value(body, "c0value1", &rule.condition[0].value1) &&
+                   qcondition_value(body, "c0value2", &rule.condition[0].value2);
+  rule.condition[1].source = qint(body, "c1source", 0);
+  rule.condition[1].op = qint(body, "c1op", 0);
+  values_ok = qcondition_value(body, "c1value1", &rule.condition[1].value1) &&
+              qcondition_value(body, "c1value2", &rule.condition[1].value2) &&
+              values_ok;
+  if (rule.target_relay >= c.relay_count ||
+      rule.action > SC_AUTOMATION_ACTION_TOGGLE ||
+      rule.logic > SC_AUTOMATION_LOGIC_OR ||
+      rule.trigger_mode > SC_AUTOMATION_PERIODIC ||
+      rule.gate_timer > SC_MAX_TIMERS ||
+      !automation_source_valid(rule.condition[0].source) ||
+      !automation_source_valid(rule.condition[1].source) ||
+      rule.condition[0].op > SC_AUTOMATION_EQUAL ||
+      rule.condition[1].op > SC_AUTOMATION_EQUAL ||
+      !values_ok ||
+      (rule.enabled && rule.condition[0].source == SC_AUTOMATION_SOURCE_NONE) ||
+      !isfinite(rule.condition[0].value1) || !isfinite(rule.condition[0].value2) ||
+      !isfinite(rule.condition[1].value1) || !isfinite(rule.condition[1].value2))
+    return automation_reply(r, false, "Invalid rule configuration");
+  if (rule.trigger_mode == SC_AUTOMATION_PERIODIC &&
+      rule.action == SC_AUTOMATION_ACTION_TOGGLE)
+    return automation_reply(r, false, "Periodic Toggle is not allowed");
+  if ((rule.condition[0].op == SC_AUTOMATION_BETWEEN &&
+       rule.condition[0].value2 < rule.condition[0].value1) ||
+      (rule.condition[1].source != SC_AUTOMATION_SOURCE_NONE &&
+       rule.condition[1].op == SC_AUTOMATION_BETWEEN &&
+       rule.condition[1].value2 < rule.condition[1].value1))
+    return automation_reply(r, false, "Between upper value must not be smaller");
+  c.automation[index] = rule;
+  if (sc_config_replace(&c) != ESP_OK)
+    return automation_reply(r, false, "Could not save rule");
+  sc_automation_reset_rule(index);
+  return automation_reply(r, true, "Rule saved");
+}
+
+static esp_err_t automation_remote_save(httpd_req_t *r)
+{
+  char body[512];
+  if (recv_body(r, body, sizeof(body)) != ESP_OK) return ESP_FAIL;
+  int index = qint(body, "id", 0) - 1;
+  if (index < 0 || index >= SC_MAX_REMOTE_SENSORS)
+    return automation_reply(r, false, "Invalid remote sensor slot");
+  sc_config_t c;
+  sc_config_snapshot(&c);
+  sc_remote_sensor_config_t remote = {0};
+  char topic[SC_REMOTE_TOPIC_LEN + 1] = {0};
+  char json_key[SC_REMOTE_KEY_LEN + 1] = {0};
+  char label[SC_REMOTE_LABEL_LEN + 1] = {0};
+  qstr(body, "topic", topic, sizeof(topic));
+  qstr(body, "jsonKey", json_key, sizeof(json_key));
+  qstr(body, "label", label, sizeof(label));
+  if (strlen(topic) >= SC_REMOTE_TOPIC_LEN ||
+      strlen(json_key) >= SC_REMOTE_KEY_LEN ||
+      strlen(label) >= SC_REMOTE_LABEL_LEN)
+    return automation_reply(r, false, "Remote sensor field is too long");
+  memcpy(remote.topic, topic, strlen(topic) + 1);
+  memcpy(remote.json_key, json_key, strlen(json_key) + 1);
+  memcpy(remote.label, label, strlen(label) + 1);
+  if (remote.topic[0] && !valid_publish_topic(remote.topic))
+    return automation_reply(r, false, "Invalid MQTT topic");
+  for (uint8_t i = 0; remote.topic[0] && i < SC_MAX_REMOTE_SENSORS; i++)
+    if (i != index && !strcmp(remote.topic, c.remote_sensor[i].topic))
+      return automation_reply(r, false, "MQTT topic is already assigned");
+  char old_topic[SC_REMOTE_TOPIC_LEN];
+  memcpy(old_topic, c.remote_sensor[index].topic, sizeof(old_topic));
+  c.remote_sensor[index] = remote;
+  if (sc_config_replace(&c) != ESP_OK)
+    return automation_reply(r, false, "Could not save remote sensor");
+  sc_automation_reset_remote(index);
+  sc_mqtt_update_remote_subscription(old_topic, remote.topic);
+  return automation_reply(r, true, remote.topic[0] ? "Remote sensor saved" : "Remote sensor cleared");
+}
+
 static esp_err_t input_config(httpd_req_t *r) {
   sc_config_t c;
   sc_config_snapshot(&c);
@@ -282,13 +472,12 @@ static esp_err_t apply_inputs(httpd_req_t *r) {
   if (sc_config_replace(&c) != ESP_OK)
     return send_error(r, HTTPD_500, "save failed");
   httpd_resp_set_type(r, "text/html");
-  esp_err_t e = httpd_resp_sendstr(
+  return httpd_resp_sendstr(
       r, "<!doctype html><meta name='viewport' "
          "content='width=device-width'><title>Inputs saved</title><body "
          "style='font:14px Arial;padding:24px'><h2>Input configuration "
-         "saved</h2><p>Restarting the node...</p></body>");
-  schedule_reboot();
-  return e;
+         "saved</h2><p>Restart manually to apply the new GPIO configuration.</p>"
+         "<p><a href='/Input_Relays_Map.html'>Back to inputs</a></p></body>");
 }
 static esp_err_t temperature_config(httpd_req_t *r) {
   sc_config_t c;
@@ -359,17 +548,17 @@ static esp_err_t apply_temperature(httpd_req_t *r) {
   if (sc_config_replace(&c) != ESP_OK)
     return send_error(r, HTTPD_500, "save failed");
   httpd_resp_set_type(r, "text/html");
-  esp_err_t e = httpd_resp_sendstr(
+  return httpd_resp_sendstr(
       r, "<!doctype html><meta name='viewport' "
          "content='width=device-width'><title>Temperature saved</title><body "
          "style='font:14px Arial;padding:24px'><h2>Temperature control "
-         "saved</h2><p>Restarting the node...</p></body>");
-  schedule_reboot();
-  return e;
+         "saved</h2><p>Values were saved. Restart manually to apply sensor task or "
+         "GPIO changes.</p><p><a href='/AdvancedTemperatureConf.html'>Back to "
+         "temperature control</a></p></body>");
 }
 
-static esp_err_t apply(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK){send_error(r,HTTPD_400,"missing query");return ESP_FAIL;}sc_config_t c;sc_config_snapshot(&c);qstr(q,"PhyLoc",c.phy_loc,sizeof(c.phy_loc));char submitted_ssid[SC_SSID_LEN]={0};qstr(q,"ssid",submitted_ssid,sizeof(submitted_ssid));if(submitted_ssid[0])snprintf(c.ssid,sizeof(c.ssid),"%s",submitted_ssid);char pw[SC_PASS_LEN]={0};if(httpd_query_key_value(q,"pass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.wifi_password,sizeof(c.wifi_password),"%s",pw);qstr(q,"timeserver",c.timeserver,sizeof(c.timeserver));qstr(q,"Web_User",c.web_user,sizeof(c.web_user));if(!c.web_user[0]||strchr(c.web_user,':'))return send_error(r,HTTPD_400,"invalid web username");char web_password[SC_PASS_LEN]={0};qstr(q,"Web_Password",web_password,sizeof(web_password));if(web_password[0])snprintf(c.web_password,sizeof(c.web_password),"%s",web_password);c.timezone_hours=qint(q,"ntptz",c.timezone_hours);c.mqtt_active=httpd_query_key_value(q,"MQTT_Active",pw,sizeof(pw))==ESP_OK;c.ha_discovery_active=httpd_query_key_value(q,"HA_Discovery_Active",pw,sizeof(pw))==ESP_OK;qstr(q,"MQTT_BROKER",c.mqtt_broker,sizeof(c.mqtt_broker));c.mqtt_port=qint(q,"MQTT_B_PRT",c.mqtt_port);c.mqtt_keepalive_sec=qint(q,"MQTT_KeepAliveSeconds",c.mqtt_keepalive_sec);qstr(q,"mqttUser",c.mqtt_user,sizeof(c.mqtt_user));memset(pw,0,sizeof(pw));if(httpd_query_key_value(q,"mqttPass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.mqtt_password,sizeof(c.mqtt_password),"%s",pw);c.modbus_active=httpd_query_key_value(q,"Modbus_Active",pw,sizeof(pw))==ESP_OK;c.modbus_port=qint(q,"Modbus_Port",c.modbus_port);int unit_id=qint(q,"Modbus_Slave_ID",c.modbus_unit_id);if(unit_id<1||unit_id>247)return send_error(r,HTTPD_400,"invalid Modbus slave ID");c.modbus_unit_id=(uint8_t)unit_id;c.ds18b20_active=httpd_query_key_value(q,"DS18B20_Active",pw,sizeof(pw))==ESP_OK;c.ds18b20_gpio=qint(q,"TempSensorPin",c.ds18b20_gpio);c.ds18b20_second_gpio=qint(q,"SecondTempSensorPin",c.ds18b20_second_gpio);if(sc_config_replace(&c)!=ESP_OK){send_error(r,HTTPD_500,"save failed");return ESP_FAIL;}httpd_resp_set_type(r,"text/html");esp_err_t e=httpd_resp_sendstr(r,"<h2>Configuration saved</h2><p>Restarting...</p>");schedule_reboot();return e;}
-static esp_err_t applyrelay(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return ESP_FAIL;sc_config_t c;sc_config_snapshot(&c);int n=qint(q,"RELAYNB",0);if(n<0||n>=c.relay_count)return ESP_FAIL;qstr(q,"PUB_TOPIC1",c.relay[n].pub_topic,sizeof(c.relay[n].pub_topic));qstr(q,"STATE_PUB_TOPIC",c.relay[n].state_pub_topic,sizeof(c.relay[n].state_pub_topic));qstr(q,"SUB_TOPIC1",c.relay[n].sub_topic,sizeof(c.relay[n].sub_topic));qstr(q,"LWILL_TOPIC",c.relay[n].lwill_topic,sizeof(c.relay[n].lwill_topic));qstr(q,"ACS_AMPS",c.relay[n].acs_topic,sizeof(c.relay[n].acs_topic));c.relay[n].ttl_sec=qu32(q,"ttl",c.relay[n].ttl_sec);c.relay[n].tta_sec=qu32(q,"tta",c.relay[n].tta_sec);char acb[8];c.relay[n].acs_enabled=httpd_query_key_value(q,"ACS_Active",acb,sizeof(acb))==ESP_OK;c.relay[n].acs_model_amps=qint(q,"ACS_Sensor_Model",c.relay[n].acs_model_amps);c.relay[n].max_current=qfloat(q,"Max_Current",c.relay[n].max_current);if(sc_config_replace(&c)!=ESP_OK)return ESP_FAIL;httpd_resp_set_type(r,"text/html");esp_err_t e=httpd_resp_sendstr(r,"<h2>Relay saved</h2><p>Restarting...</p>");schedule_reboot();return e;}
+static esp_err_t apply(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK){send_error(r,HTTPD_400,"missing query");return ESP_FAIL;}sc_config_t c;sc_config_snapshot(&c);qstr(q,"PhyLoc",c.phy_loc,sizeof(c.phy_loc));char submitted_ssid[SC_SSID_LEN]={0};qstr(q,"ssid",submitted_ssid,sizeof(submitted_ssid));if(submitted_ssid[0])snprintf(c.ssid,sizeof(c.ssid),"%s",submitted_ssid);char pw[SC_PASS_LEN]={0};if(httpd_query_key_value(q,"pass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.wifi_password,sizeof(c.wifi_password),"%s",pw);qstr(q,"timeserver",c.timeserver,sizeof(c.timeserver));qstr(q,"Web_User",c.web_user,sizeof(c.web_user));if(!c.web_user[0]||strchr(c.web_user,':'))return send_error(r,HTTPD_400,"invalid web username");char web_password[SC_PASS_LEN]={0};qstr(q,"Web_Password",web_password,sizeof(web_password));if(web_password[0])snprintf(c.web_password,sizeof(c.web_password),"%s",web_password);c.timezone_hours=qint(q,"ntptz",c.timezone_hours);c.mqtt_active=httpd_query_key_value(q,"MQTT_Active",pw,sizeof(pw))==ESP_OK;c.ha_discovery_active=httpd_query_key_value(q,"HA_Discovery_Active",pw,sizeof(pw))==ESP_OK;qstr(q,"MQTT_BROKER",c.mqtt_broker,sizeof(c.mqtt_broker));c.mqtt_port=qint(q,"MQTT_B_PRT",c.mqtt_port);c.mqtt_keepalive_sec=qint(q,"MQTT_KeepAliveSeconds",c.mqtt_keepalive_sec);qstr(q,"mqttUser",c.mqtt_user,sizeof(c.mqtt_user));memset(pw,0,sizeof(pw));if(httpd_query_key_value(q,"mqttPass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.mqtt_password,sizeof(c.mqtt_password),"%s",pw);c.modbus_active=httpd_query_key_value(q,"Modbus_Active",pw,sizeof(pw))==ESP_OK;c.modbus_port=qint(q,"Modbus_Port",c.modbus_port);int unit_id=qint(q,"Modbus_Slave_ID",c.modbus_unit_id);if(unit_id<1||unit_id>247)return send_error(r,HTTPD_400,"invalid Modbus slave ID");c.modbus_unit_id=(uint8_t)unit_id;c.ds18b20_active=httpd_query_key_value(q,"DS18B20_Active",pw,sizeof(pw))==ESP_OK;c.ds18b20_gpio=qint(q,"TempSensorPin",c.ds18b20_gpio);c.ds18b20_second_gpio=qint(q,"SecondTempSensorPin",c.ds18b20_second_gpio);if(sc_config_replace(&c)!=ESP_OK){send_error(r,HTTPD_500,"save failed");return ESP_FAIL;}httpd_resp_set_type(r,"text/html");return httpd_resp_sendstr(r,"<h2>Configuration saved</h2><p>Restart manually from the configuration page to apply network and service changes.</p><p><a href='/config.html'>Back to configuration</a></p>");}
+static esp_err_t applyrelay(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return ESP_FAIL;sc_config_t c;sc_config_snapshot(&c);int n=qint(q,"RELAYNB",0);if(n<0||n>=c.relay_count)return ESP_FAIL;char old_sub[SC_TOPIC_LEN],old_pub[SC_TOPIC_LEN];snprintf(old_sub,sizeof(old_sub),"%s",c.relay[n].sub_topic);snprintf(old_pub,sizeof(old_pub),"%s",c.relay[n].pub_topic);qstr(q,"PUB_TOPIC1",c.relay[n].pub_topic,sizeof(c.relay[n].pub_topic));qstr(q,"STATE_PUB_TOPIC",c.relay[n].state_pub_topic,sizeof(c.relay[n].state_pub_topic));qstr(q,"SUB_TOPIC1",c.relay[n].sub_topic,sizeof(c.relay[n].sub_topic));qstr(q,"LWILL_TOPIC",c.relay[n].lwill_topic,sizeof(c.relay[n].lwill_topic));qstr(q,"ACS_AMPS",c.relay[n].acs_topic,sizeof(c.relay[n].acs_topic));c.relay[n].ttl_sec=qu32(q,"ttl",c.relay[n].ttl_sec);c.relay[n].tta_sec=qu32(q,"tta",c.relay[n].tta_sec);char acb[8];c.relay[n].acs_enabled=httpd_query_key_value(q,"ACS_Active",acb,sizeof(acb))==ESP_OK;c.relay[n].acs_model_amps=qint(q,"ACS_Sensor_Model",c.relay[n].acs_model_amps);c.relay[n].max_current=qfloat(q,"Max_Current",c.relay[n].max_current);if(sc_config_replace(&c)!=ESP_OK)return ESP_FAIL;sc_relay_set_timing((uint8_t)n,true,c.relay[n].ttl_sec);sc_relay_set_timing((uint8_t)n,false,c.relay[n].tta_sec);sc_mqtt_relay_config_saved((uint8_t)n,old_sub,old_pub);httpd_resp_set_type(r,"text/html");return httpd_resp_sendstr(r,"<h2>Relay saved</h2><p>TTL and TTA are active and synchronized to retained MQTT topics. Restart manually to apply GPIO changes.</p><p><a href='/RelayConfig.html'>Back to relays</a></p>");}
 
 static int64_t civil_days(int y,unsigned m,unsigned d){y-=m<=2;const int era=(y>=0?y:y-399)/400;const unsigned yoe=(unsigned)(y-era*400);const unsigned doy=(153*(m+(m>2?-3:9))+2)/5+d-1;const unsigned doe=yoe*365+yoe/4-yoe/100+doy;return (int64_t)era*146097+(int64_t)doe-719468;}
 static bool parse_date(const char*s,int*y,int*m,int*d){return s&&sscanf(s,"%d-%d-%d",y,m,d)==3&&*m>=1&&*m<=12&&*d>=1&&*d<=31;}
@@ -396,7 +585,7 @@ static cJSON *config_json(bool secrets) {
   sc_config_t c;
   sc_config_snapshot(&c);
   cJSON *j = cJSON_CreateObject();
-  cJSON_AddNumberToObject(j, "_version", 6);
+  cJSON_AddNumberToObject(j, "_version", 7);
   cJSON_AddStringToObject(j, "PhyLoc", c.phy_loc);
   cJSON_AddStringToObject(j, "ssid", c.ssid);
   if (secrets)
@@ -469,6 +658,36 @@ static cJSON *config_json(bool secrets) {
   cJSON_AddNumberToObject(tc, "low", c.temp_control.low_c);
   cJSON_AddNumberToObject(tc, "high", c.temp_control.high_c);
   cJSON_AddNumberToObject(tc, "buffer", c.temp_control.buffer_c);
+  cJSON *aa = cJSON_AddArrayToObject(j, "automation");
+  for (int i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
+    const sc_automation_rule_t *rule = &c.automation[i];
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "enabled", rule->enabled);
+    cJSON_AddNumberToObject(o, "target", rule->target_relay);
+    cJSON_AddNumberToObject(o, "action", rule->action);
+    cJSON_AddNumberToObject(o, "logic", rule->logic);
+    cJSON_AddNumberToObject(o, "trigger", rule->trigger_mode);
+    cJSON_AddNumberToObject(o, "gate", rule->gate_timer);
+    cJSON_AddNumberToObject(o, "hold", rule->hold_sec);
+    cJSON_AddNumberToObject(o, "cooldown", rule->cooldown_sec);
+    cJSON_AddNumberToObject(o, "c0source", rule->condition[0].source);
+    cJSON_AddNumberToObject(o, "c0op", rule->condition[0].op);
+    cJSON_AddNumberToObject(o, "c0v1", rule->condition[0].value1);
+    cJSON_AddNumberToObject(o, "c0v2", rule->condition[0].value2);
+    cJSON_AddNumberToObject(o, "c1source", rule->condition[1].source);
+    cJSON_AddNumberToObject(o, "c1op", rule->condition[1].op);
+    cJSON_AddNumberToObject(o, "c1v1", rule->condition[1].value1);
+    cJSON_AddNumberToObject(o, "c1v2", rule->condition[1].value2);
+    cJSON_AddItemToArray(aa, o);
+  }
+  cJSON *rsa = cJSON_AddArrayToObject(j, "remoteSensors");
+  for (int i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "topic", c.remote_sensor[i].topic);
+    cJSON_AddStringToObject(o, "jsonKey", c.remote_sensor[i].json_key);
+    cJSON_AddStringToObject(o, "label", c.remote_sensor[i].label);
+    cJSON_AddItemToArray(rsa, o);
+  }
   return j;
 }
 static int jtruth(cJSON *x) {
@@ -630,6 +849,76 @@ static esp_err_t restore_config_object(cJSON *j) {
     if (cJSON_IsNumber(x) && x->valuedouble > 0)
       c.temp_control.buffer_c = x->valuedouble;
   }
+  cJSON *aa = cJSON_GetObjectItem(j, "automation");
+  if (cJSON_IsArray(aa)) {
+    for (int i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
+      cJSON *o = cJSON_GetArrayItem(aa, i);
+      if (!cJSON_IsObject(o)) continue;
+      sc_automation_rule_t rule = {0};
+#define RESTORE_RULE_INT(name, field) do { x=cJSON_GetObjectItem(o,name); if(cJSON_IsNumber(x)) rule.field=x->valueint; } while(0)
+#define RESTORE_RULE_FLOAT(name, field) do { x=cJSON_GetObjectItem(o,name); if(cJSON_IsNumber(x)) rule.field=(float)x->valuedouble; } while(0)
+      x = cJSON_GetObjectItem(o, "enabled");
+      rule.enabled = jtruth(x);
+      RESTORE_RULE_INT("target", target_relay);
+      RESTORE_RULE_INT("action", action);
+      RESTORE_RULE_INT("logic", logic);
+      RESTORE_RULE_INT("trigger", trigger_mode);
+      RESTORE_RULE_INT("gate", gate_timer);
+      RESTORE_RULE_INT("hold", hold_sec);
+      RESTORE_RULE_INT("cooldown", cooldown_sec);
+      RESTORE_RULE_INT("c0source", condition[0].source);
+      RESTORE_RULE_INT("c0op", condition[0].op);
+      RESTORE_RULE_FLOAT("c0v1", condition[0].value1);
+      RESTORE_RULE_FLOAT("c0v2", condition[0].value2);
+      RESTORE_RULE_INT("c1source", condition[1].source);
+      RESTORE_RULE_INT("c1op", condition[1].op);
+      RESTORE_RULE_FLOAT("c1v1", condition[1].value1);
+      RESTORE_RULE_FLOAT("c1v2", condition[1].value2);
+#undef RESTORE_RULE_INT
+#undef RESTORE_RULE_FLOAT
+      if (rule.target_relay >= c.relay_count ||
+          rule.action > SC_AUTOMATION_ACTION_TOGGLE ||
+          rule.logic > SC_AUTOMATION_LOGIC_OR ||
+          rule.trigger_mode > SC_AUTOMATION_PERIODIC ||
+          rule.gate_timer > SC_MAX_TIMERS ||
+          !automation_source_valid(rule.condition[0].source) ||
+          !automation_source_valid(rule.condition[1].source) ||
+          rule.condition[0].op > SC_AUTOMATION_EQUAL ||
+          rule.condition[1].op > SC_AUTOMATION_EQUAL ||
+          (rule.enabled &&
+           rule.condition[0].source == SC_AUTOMATION_SOURCE_NONE) ||
+          (rule.condition[0].op == SC_AUTOMATION_BETWEEN &&
+           rule.condition[0].value2 < rule.condition[0].value1) ||
+          (rule.condition[1].source != SC_AUTOMATION_SOURCE_NONE &&
+           rule.condition[1].op == SC_AUTOMATION_BETWEEN &&
+           rule.condition[1].value2 < rule.condition[1].value1) ||
+          (rule.trigger_mode == SC_AUTOMATION_PERIODIC &&
+           rule.action == SC_AUTOMATION_ACTION_TOGGLE))
+        rule.enabled = 0;
+      c.automation[i] = rule;
+    }
+  }
+  cJSON *rsa = cJSON_GetObjectItem(j, "remoteSensors");
+  if (cJSON_IsArray(rsa)) {
+    for (int i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
+      cJSON *o = cJSON_GetArrayItem(rsa, i);
+      if (!cJSON_IsObject(o)) continue;
+      jcpy(o, "topic", c.remote_sensor[i].topic,
+           sizeof(c.remote_sensor[i].topic));
+      jcpy(o, "jsonKey", c.remote_sensor[i].json_key,
+           sizeof(c.remote_sensor[i].json_key));
+      jcpy(o, "label", c.remote_sensor[i].label,
+           sizeof(c.remote_sensor[i].label));
+      if (c.remote_sensor[i].topic[0] &&
+          !valid_publish_topic(c.remote_sensor[i].topic))
+        memset(&c.remote_sensor[i], 0, sizeof(c.remote_sensor[i]));
+      for (int previous = 0; c.remote_sensor[i].topic[0] && previous < i;
+           previous++)
+        if (!strcmp(c.remote_sensor[i].topic,
+                    c.remote_sensor[previous].topic))
+          memset(&c.remote_sensor[i], 0, sizeof(c.remote_sensor[i]));
+    }
+  }
   if (!c.web_user[0] || strchr(c.web_user, ':') || !c.web_password[0])
     return ESP_ERR_INVALID_ARG;
   return sc_config_replace(&c);
@@ -654,7 +943,7 @@ static void restore_meta_done(restore_state_t*s){s->meta[s->meta_len]=0;if(!strc
 static void restore_b64_char(restore_state_t*s,uint8_t c){if(s->file_skip||s->failed)return;s->group[s->group_len++]=c;if(s->group_len==4){uint8_t raw[3];int n=b64_decode4(s->group,raw);s->group_len=0;if(n<0)s->failed=true;else restore_emit(s,raw,(size_t)n);}}
 static void restore_byte(restore_state_t*s,char c){switch(s->phase){case REST_KEY_START:if(c=='\"'){s->key_len=0;s->phase=REST_KEY;}else if(c=='}')s->phase=REST_DONE;break;case REST_KEY:if(c=='\"'){s->key[s->key_len]=0;s->phase=REST_COLON;}else if(s->key_len+1<sizeof(s->key))s->key[s->key_len++]=c;else s->failed=true;break;case REST_COLON:if(c==':')s->phase=REST_VALUE_START;break;case REST_VALUE_START:if(isspace((unsigned char)c))break;s->meta_len=0;if(c=='\"'){if(s->key[0]=='_')s->phase=REST_META_STRING;else{restore_begin_file(s);s->phase=REST_FILE_STRING;}}else{s->meta[s->meta_len++]=c;s->phase=REST_META_BARE;}break;case REST_META_STRING:if(c=='\"'){restore_meta_done(s);s->phase=REST_COMMA;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_META_BARE:if(c==','||c=='}'){while(s->meta_len&&isspace((unsigned char)s->meta[s->meta_len-1]))s->meta_len--;restore_meta_done(s);s->phase=c=='}'?REST_DONE:REST_KEY_START;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_FILE_STRING:if(c=='\"'){restore_finish_file(s);s->phase=REST_COMMA;}else restore_b64_char(s,(uint8_t)c);break;case REST_COMMA:if(c==',')s->phase=REST_KEY_START;else if(c=='}')s->phase=REST_DONE;break;case REST_DONE:break;}}
 static esp_err_t backup_restore(httpd_req_t*r){restore_state_t s={.phase=REST_KEY_START};char q[128],v[16];if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK){if(httpd_query_key_value(q,"restoreWeb",v,sizeof(v))==ESP_OK)s.restore_web=atoi(v)!=0;if(httpd_query_key_value(q,"chipIdMode",s.chip_mode,sizeof(s.chip_mode))!=ESP_OK)snprintf(s.chip_mode,sizeof(s.chip_mode),"keep");}char input[512];int left=r->content_len;while(left>0&&!s.failed){int want=left>(int)sizeof(input)?sizeof(input):left;int n=httpd_req_recv(r,input,want);if(n<=0){s.failed=true;break;}for(int i=0;i<n&&!s.failed;i++)restore_byte(&s,input[i]);left-=n;}if(s.file_open){sc_webfs_stream_close();s.file_open=false;}bool ok=!s.failed&&s.saw_version&&s.phase==REST_DONE;if(ok&&s.restore_web)ok=s.includes_web&&s.written>0;if(ok&&!s.restore_web){if(!s.config)ok=false;else{char target[13]={0};if(!strcmp(s.chip_mode,"replace"))controller_id(target);else if(!strcmp(s.chip_mode,"original")&&strlen(s.old_id)==12){memcpy(target,s.old_id,12);target[12]=0;}if(target[0])normalize_controller_ids(s.config,target);cJSON*j=cJSON_Parse(s.config);if(!j)ok=false;else{ok=restore_config_object(j)==ESP_OK;cJSON_Delete(j);}}}free(s.config);char message[128];if(ok&&s.restore_web)snprintf(message,sizeof(message),"%u web file(s) restored",s.written);else if(ok)snprintf(message,sizeof(message),"Configuration restored");else snprintf(message,sizeof(message),"Restore failed or backup is not compatible");cJSON*out=cJSON_CreateObject();cJSON_AddBoolToObject(out,"ok",ok);cJSON_AddStringToObject(out,"message",message);esp_err_t response=js(r,out);if(ok)schedule_reboot();return response;}
-static esp_err_t reset_config(httpd_req_t*r){sc_config_t old,defaults;sc_config_snapshot(&old);sc_config_defaults(&defaults);for(int i=0;i<SC_MAX_TIMERS;i++){defaults.timer[i]=old.timer[i];defaults.timer[i].enabled=0;defaults.timer_schedule[i]=old.timer_schedule[i];}bool ok=sc_config_replace(&defaults)==ESP_OK;cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",ok?"All configuration reset; timer schedules retained but disabled":"Reset failed");esp_err_t e=js(r,j);if(ok)schedule_reboot();return e;}
+static esp_err_t reset_config(httpd_req_t*r){sc_config_t old,defaults;sc_config_snapshot(&old);sc_config_defaults(&defaults);for(int i=0;i<SC_MAX_TIMERS;i++){defaults.timer[i]=old.timer[i];defaults.timer[i].enabled=0;defaults.timer_schedule[i]=old.timer_schedule[i];}for(int i=0;i<SC_MAX_AUTOMATION_RULES;i++){defaults.automation[i]=old.automation[i];defaults.automation[i].enabled=0;}memcpy(defaults.remote_sensor,old.remote_sensor,sizeof(defaults.remote_sensor));bool ok=sc_config_replace(&defaults)==ESP_OK;cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",ok?"All configuration reset; timers and automation retained but disabled":"Reset failed");esp_err_t e=js(r,j);if(ok)schedule_reboot();return e;}
 
 static esp_err_t files_result(httpd_req_t*r,bool ok,const char*message){cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",message);return js(r,j);}
 static esp_err_t files_list(httpd_req_t*r){size_t count=0;if(sc_webfs_count(&count))return send_error(r,HTTPD_500,"filesystem scan failed");httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");if(httpd_resp_send_chunk(r,"{\"files\":[",10)!=ESP_OK)return ESP_FAIL;for(size_t i=0;i<count;i++){sc_lfs_entry_t entry;if(sc_webfs_entry_at(i,&entry))return ESP_FAIL;char name[SC_LFS_NAME_MAX*6+1],row[SC_LFS_NAME_MAX*6+96];json_escape(name,sizeof(name),entry.name);int n=snprintf(row,sizeof(row),"%s{\"name\":\"%s\",\"size\":%u,\"dir\":%s}",i?",":"",name,(unsigned)entry.size,entry.is_dir?"true":"false");if(n<0||n>=(int)sizeof(row)||httpd_resp_send_chunk(r,row,n)!=ESP_OK)return ESP_FAIL;}char tail[96];int n=snprintf(tail,sizeof(tail),"],\"fsTotal\":%u,\"fsUsed\":%u}",(unsigned)sc_webfs_total(),(unsigned)sc_webfs_used());if(n<0||n>=(int)sizeof(tail)||httpd_resp_send_chunk(r,tail,n)!=ESP_OK)return ESP_FAIL;return httpd_resp_send_chunk(r,NULL,0);}
@@ -667,12 +956,12 @@ static esp_err_t core_status(httpd_req_t*r){sc_diag_t d;sc_diag_snapshot(&d);cha
 static esp_err_t core_erase(httpd_req_t*r){esp_err_t e=sc_diag_clear();cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",e==ESP_OK);return js(r,j);}
 static esp_err_t ota_upload(httpd_req_t*r){if(sc_ota_begin(r->content_len)!=ESP_OK){send_error(r,HTTPD_500,"ota begin failed");return ESP_FAIL;}char b[1024];int left=r->content_len;while(left>0){int want=left>(int)sizeof(b)?sizeof(b):left;int n=httpd_req_recv(r,b,want);if(n<=0||sc_ota_write(b,n)!=ESP_OK){sc_ota_abort();send_error(r,HTTPD_500,"ota write failed");return ESP_FAIL;}left-=n;}if(sc_ota_finish()!=ESP_OK){send_error(r,HTTPD_500,"ota validation failed");return ESP_FAIL;}httpd_resp_sendstr(r,"OK - rebooting");schedule_reboot();return ESP_OK;}
 
-static esp_err_t static_file(httpd_req_t*r){const char*p=!strcmp(r->uri,"/")?"/index.html":r->uri;if(!strcmp(p,"/Timer1"))p="/Timer1.html";else if(!strcmp(p,"/Input_Relays_Map"))p="/Input_Relays_Map.html";httpd_resp_set_hdr(r,"Connection","close");if(strstr(p,".html"))httpd_resp_set_type(r,"text/html");else if(strstr(p,".css"))httpd_resp_set_type(r,"text/css");else if(strstr(p,".js"))httpd_resp_set_type(r,"application/javascript");char b[768];size_t off=0,n=0;do{if(sc_webfs_read_range(p,off,b,sizeof(b),&n)){if(!off)send_error(r,HTTPD_404,"not found");return ESP_FAIL;}if(n){if(httpd_resp_send_chunk(r,b,n)!=ESP_OK)return ESP_FAIL;off+=n;}}while(n==sizeof(b));return httpd_resp_send_chunk(r,NULL,0);}
+static esp_err_t static_file(httpd_req_t*r){const char*p=!strcmp(r->uri,"/")?"/index.html":r->uri;if(!strcmp(p,"/Timer1"))p="/Timer1.html";else if(!strcmp(p,"/Input_Relays_Map"))p="/Input_Relays_Map.html";else if(!strcmp(p,"/Automation"))p="/Automation.html";httpd_resp_set_hdr(r,"Connection","close");if(strstr(p,".html"))httpd_resp_set_type(r,"text/html");else if(strstr(p,".css"))httpd_resp_set_type(r,"text/css");else if(strstr(p,".js"))httpd_resp_set_type(r,"application/javascript");char b[768];size_t off=0,n=0;do{if(sc_webfs_read_range(p,off,b,sizeof(b),&n)){if(!off)send_error(r,HTTPD_404,"not found");return ESP_FAIL;}if(n){if(httpd_resp_send_chunk(r,b,n)!=ESP_OK)return ESP_FAIL;off+=n;}}while(n==sizeof(b));return httpd_resp_send_chunk(r,NULL,0);}
 
 esp_err_t sc_web_init(void){
  httpd_config_t c=HTTPD_DEFAULT_CONFIG();c.max_open_sockets=2;c.max_uri_handlers=48;c.stack_size=8192;c.lru_purge_enable=true;c.recv_wait_timeout=5;c.send_wait_timeout=5;ESP_ERROR_CHECK(httpd_start(&server,&c));
  static const sc_web_route_t routes[]={
- {"/api/heap",HTTP_GET,heap},{"/GetConfig.json",HTTP_GET,getcfg},{"/FeatureFlags.json",HTTP_GET,feature_flags},{"/SensorStatus.json",HTTP_GET,sensors},{"/WifiStatus.json",HTTP_GET,wifi_status},{"/MqttStatus.json",HTTP_GET,mqtt_status},{"/WireGuardStatus.json",HTTP_GET,wireguard_status},{"/RelayControl.json",HTTP_GET,relayctl},{"/RelayState.json",HTTP_GET,relaystate},{"/InputConfig.json",HTTP_GET,input_config},{"/ApplyInputs.html",HTTP_POST,apply_inputs},{"/TemperatureConfig.json",HTTP_GET,temperature_config},{"/AdvancedTempSave.html",HTTP_POST,apply_temperature},{"/Apply.html",HTTP_GET,apply},{"/ApplyRelay.html",HTTP_GET,applyrelay},{"/TimerStatus.json",HTTP_GET,timer_status},{"/TimerControl.json",HTTP_GET,timer_control},{"/api/timer/save",HTTP_GET,timer_save},{"/savetimer.html",HTTP_GET,timer_save_form},{"/api/backup",HTTP_GET,backup_get},{"/api/restore",HTTP_POST,backup_restore},{"/api/resetconfig",HTTP_POST,reset_config},{"/api/files/list",HTTP_GET,files_list},{"/api/files/content",HTTP_GET,files_content_get},{"/api/files/content",HTTP_POST,files_content_post},{"/api/files/delete",HTTP_POST,files_delete},{"/api/files/rename",HTTP_POST,files_rename},{"/CoreDumpStatus.json",HTTP_GET,core_status},{"/EraseCoreDump.json",HTTP_POST,core_erase},{"/api/ota",HTTP_POST,ota_upload},
- {"/",HTTP_GET,static_file},{"/config.html",HTTP_GET,static_file},{"/LiveReadings.html",HTTP_GET,static_file},{"/RelayConfig.html",HTTP_GET,static_file},{"/Input_Relays_Map",HTTP_GET,static_file},{"/Input_Relays_Map.html",HTTP_GET,static_file},{"/AdvancedTemperatureConf.html",HTTP_GET,static_file},{"/Timer1",HTTP_GET,timer_page},{"/Timer1.html",HTTP_GET,timer_page},{"/Files.html",HTTP_GET,static_file},{"/Backup.html",HTTP_GET,static_file},{"/coredump.html",HTTP_GET,static_file},{"/FirmwareMaintenance.html",HTTP_GET,static_file}};
+ {"/api/heap",HTTP_GET,heap},{"/api/restart",HTTP_POST,restart_device},{"/GetConfig.json",HTTP_GET,getcfg},{"/FeatureFlags.json",HTTP_GET,feature_flags},{"/SensorStatus.json",HTTP_GET,sensors},{"/WifiStatus.json",HTTP_GET,wifi_status},{"/MqttStatus.json",HTTP_GET,mqtt_status},{"/WireGuardStatus.json",HTTP_GET,wireguard_status},{"/RelayControl.json",HTTP_GET,relayctl},{"/RelayState.json",HTTP_GET,relaystate},{"/InputConfig.json",HTTP_GET,input_config},{"/ApplyInputs.html",HTTP_POST,apply_inputs},{"/TemperatureConfig.json",HTTP_GET,temperature_config},{"/AdvancedTempSave.html",HTTP_POST,apply_temperature},{"/Apply.html",HTTP_GET,apply},{"/ApplyRelay.html",HTTP_GET,applyrelay},{"/TimerStatus.json",HTTP_GET,timer_status},{"/TimerControl.json",HTTP_GET,timer_control},{"/api/timer/save",HTTP_GET,timer_save},{"/savetimer.html",HTTP_GET,timer_save_form},{"/api/automation",HTTP_GET,automation_get},{"/api/automation/rule",HTTP_POST,automation_rule_save},{"/api/automation/remote",HTTP_POST,automation_remote_save},{"/api/backup",HTTP_GET,backup_get},{"/api/restore",HTTP_POST,backup_restore},{"/api/resetconfig",HTTP_POST,reset_config},{"/api/files/list",HTTP_GET,files_list},{"/api/files/content",HTTP_GET,files_content_get},{"/api/files/content",HTTP_POST,files_content_post},{"/api/files/delete",HTTP_POST,files_delete},{"/api/files/rename",HTTP_POST,files_rename},{"/CoreDumpStatus.json",HTTP_GET,core_status},{"/EraseCoreDump.json",HTTP_POST,core_erase},{"/api/ota",HTTP_POST,ota_upload},
+ {"/",HTTP_GET,static_file},{"/config.html",HTTP_GET,static_file},{"/LiveReadings.html",HTTP_GET,static_file},{"/RelayConfig.html",HTTP_GET,static_file},{"/Input_Relays_Map",HTTP_GET,static_file},{"/Input_Relays_Map.html",HTTP_GET,static_file},{"/AdvancedTemperatureConf.html",HTTP_GET,static_file},{"/Timer1",HTTP_GET,timer_page},{"/Timer1.html",HTTP_GET,timer_page},{"/Automation",HTTP_GET,static_file},{"/Files.html",HTTP_GET,static_file},{"/Backup.html",HTTP_GET,static_file},{"/coredump.html",HTTP_GET,static_file},{"/FirmwareMaintenance.html",HTTP_GET,static_file}};
  for(unsigned i=0;i<sizeof(routes)/sizeof(routes[0]);i++){httpd_uri_t u={.uri=routes[i].uri,.method=routes[i].method,.handler=auth_dispatch,.user_ctx=(void*)&routes[i]};esp_err_t e=httpd_register_uri_handler(server,&u);if(e!=ESP_OK)return e;}return ESP_OK;
 }

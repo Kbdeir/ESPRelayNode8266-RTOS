@@ -19,4 +19,5 @@ idf_component_register(
         sc_ha
         sc_diag
         sc_ota
+        sc_automation
 )

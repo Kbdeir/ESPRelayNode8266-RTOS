@@ -136,7 +136,7 @@ esp_err_t sc_relay_init(void)
     q = xQueueCreate(12, sizeof(sc_relay_cmd_t));
     if (!q)
         return ESP_ERR_NO_MEM;
-    return xTaskCreate(task, "relay", 1536, NULL, 6, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    return xTaskCreate(task, "relay", 2560, NULL, 6, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 bool sc_relay_submit(const sc_relay_cmd_t *c) { return q && c && xQueueSend(q, c, pdMS_TO_TICKS(50)) == pdTRUE; }
 bool sc_relay_get(uint8_t n) { return n < SC_MAX_RELAYS ? state[n] : false; }
@@ -154,6 +154,34 @@ bool sc_relay_status(uint8_t n, sc_relay_status_t *out)
     out->tta_active = tta > now;
     out->ttl_remaining_sec = out->ttl_active ? (uint32_t)((ttl - now + 999999) / 1000000) : 0;
     out->tta_remaining_sec = out->tta_active ? (uint32_t)((tta - now + 999999) / 1000000) : 0;
+    return true;
+}
+bool sc_relay_set_timing(uint8_t n, bool ttl, uint32_t seconds)
+{
+    if (n >= relay_count) return false;
+    int64_t now = esp_timer_get_time();
+    bool activate = false;
+    taskENTER_CRITICAL();
+    if (ttl) {
+        relay_cfg[n].ttl_sec = seconds;
+        if (state[n])
+            ttl_deadline_us[n] = deadline_after(now, seconds);
+    } else {
+        relay_cfg[n].tta_sec = seconds;
+        if (tta_deadline_us[n]) {
+            tta_deadline_us[n] = deadline_after(now, seconds);
+            activate = seconds == 0;
+        }
+    }
+    taskEXIT_CRITICAL();
+    if (activate) {
+        sc_relay_cmd_t command = {
+            .relay = n,
+            .op = SC_RELAY_SET,
+            .value = true,
+        };
+        sc_relay_submit(&command);
+    }
     return true;
 }
 uint8_t sc_relay_count(void) { return relay_count; }

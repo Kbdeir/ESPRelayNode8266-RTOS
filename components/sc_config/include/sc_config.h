@@ -4,6 +4,11 @@
 
 #define SC_MAX_TIMERS 4
 #define SC_MAX_INPUTS 3
+#define SC_MAX_AUTOMATION_RULES 4
+#define SC_MAX_REMOTE_SENSORS 8
+#define SC_REMOTE_TOPIC_LEN 64
+#define SC_REMOTE_KEY_LEN 32
+#define SC_REMOTE_LABEL_LEN 32
 
 typedef enum {
     SC_INPUT_NONE=0,
@@ -28,6 +33,78 @@ typedef struct {
     float high_c;
     float buffer_c;
 } sc_temp_control_config_t;
+
+typedef enum {
+    SC_AUTOMATION_SOURCE_NONE = 0,
+    SC_AUTOMATION_SOURCE_TEMP1 = 1,
+    SC_AUTOMATION_SOURCE_TEMP2 = 2,
+    SC_AUTOMATION_SOURCE_ACS = 3,
+    SC_AUTOMATION_SOURCE_INPUT1 = 4,
+    SC_AUTOMATION_SOURCE_INPUT2 = 5,
+    SC_AUTOMATION_SOURCE_INPUT3 = 6,
+    SC_AUTOMATION_SOURCE_RELAY1 = 7,
+    SC_AUTOMATION_SOURCE_RELAY2 = 8,
+    SC_AUTOMATION_SOURCE_RELAY3 = 9,
+    SC_AUTOMATION_SOURCE_RELAY4 = 10,
+    SC_AUTOMATION_SOURCE_REMOTE1 = 20,
+    SC_AUTOMATION_SOURCE_REMOTE2 = 21,
+    SC_AUTOMATION_SOURCE_REMOTE3 = 22,
+    SC_AUTOMATION_SOURCE_REMOTE4 = 23,
+    SC_AUTOMATION_SOURCE_REMOTE5 = 24,
+    SC_AUTOMATION_SOURCE_REMOTE6 = 25,
+    SC_AUTOMATION_SOURCE_REMOTE7 = 26,
+    SC_AUTOMATION_SOURCE_REMOTE8 = 27
+} sc_automation_source_t;
+
+typedef enum {
+    SC_AUTOMATION_GREATER_THAN = 0,
+    SC_AUTOMATION_LESS_THAN = 1,
+    SC_AUTOMATION_BETWEEN = 2,
+    SC_AUTOMATION_EQUAL = 3
+} sc_automation_operator_t;
+
+typedef enum {
+    SC_AUTOMATION_ACTION_ON = 0,
+    SC_AUTOMATION_ACTION_OFF = 1,
+    SC_AUTOMATION_ACTION_TOGGLE = 2
+} sc_automation_action_t;
+
+typedef enum {
+    SC_AUTOMATION_LOGIC_AND = 0,
+    SC_AUTOMATION_LOGIC_OR = 1
+} sc_automation_logic_t;
+
+typedef enum {
+    SC_AUTOMATION_ON_CHANGE = 0,
+    SC_AUTOMATION_PERIODIC = 1
+} sc_automation_trigger_t;
+
+typedef struct {
+    uint8_t source;
+    uint8_t op;
+    uint16_t reserved;
+    float value1;
+    float value2;
+} sc_automation_condition_t;
+
+typedef struct {
+    uint8_t enabled;
+    uint8_t target_relay;
+    uint8_t action;
+    uint8_t logic;
+    uint8_t trigger_mode;
+    uint8_t gate_timer;
+    uint16_t hold_sec;
+    uint16_t cooldown_sec;
+    uint16_t reserved;
+    sc_automation_condition_t condition[2];
+} sc_automation_rule_t;
+
+typedef struct {
+    char topic[SC_REMOTE_TOPIC_LEN];
+    char json_key[SC_REMOTE_KEY_LEN];
+    char label[SC_REMOTE_LABEL_LEN];
+} sc_remote_sensor_config_t;
 
 typedef struct {
     uint8_t relay_nb;
@@ -117,11 +194,17 @@ typedef struct {
     /* Appended in config v6 so the complete v5 blob remains a stable prefix. */
     char web_user[SC_USER_LEN];
     char web_password[SC_PASS_LEN];
+    /* Appended in config v7 so the complete v6 blob remains a stable prefix. */
+    sc_automation_rule_t automation[SC_MAX_AUTOMATION_RULES];
+    sc_remote_sensor_config_t remote_sensor[SC_MAX_REMOTE_SENSORS];
 } sc_config_t;
 
 esp_err_t sc_config_init(void);
+esp_err_t sc_config_storage_ready(void);
 void sc_config_snapshot(sc_config_t *out);
 const sc_config_t *sc_config_acquire(void);
 void sc_config_release(void);
 esp_err_t sc_config_replace(const sc_config_t *cfg);
+esp_err_t sc_config_set_relay_timing(uint8_t relay, bool ttl,
+                                     uint32_t seconds);
 void sc_config_defaults(sc_config_t *cfg);

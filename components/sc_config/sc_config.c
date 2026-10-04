@@ -6,8 +6,10 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "sc_config.h"
+#include "sc_littlefs.h"
 
-#define CFG_VERSION 6
+#define CFG_VERSION 7
+#define CFG_VERSION_V6 6
 #define CFG_VERSION_V5 5
 #define CFG_VERSION_V4 4
 #define CFG_VERSION_V3 3
@@ -15,6 +17,66 @@
 static const char *TAG="cfg";
 static SemaphoreHandle_t lock;
 static sc_config_t cfg;
+static bool storage_ready;
+
+#define CFG_FILE "/.smartcfg"
+#define CFG_TEMP_FILE "/.smartcfg.tmp"
+#define CFG_FILE_MAGIC 0x53434647U
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t size;
+    uint32_t hash;
+} cfg_file_header_t;
+
+static uint32_t hash_update(uint32_t hash,const void *data,size_t len){
+    const uint8_t *p=data;
+    while(len--){hash^=*p++;hash*=16777619U;}
+    return hash;
+}
+
+static uint32_t config_hash(const sc_config_t *value){
+    return hash_update(2166136261U,value,sizeof(*value));
+}
+
+static esp_err_t persist_file(const sc_config_t *value){
+    if(!value||value->version!=CFG_VERSION)return ESP_ERR_INVALID_ARG;
+    cfg_file_header_t header={CFG_FILE_MAGIC,CFG_VERSION,sizeof(*value),config_hash(value)};
+    int result=sc_lfs_stream_open(CFG_TEMP_FILE);
+    if(result<0)return ESP_FAIL;
+    if(sc_lfs_stream_write(&header,sizeof(header))<0||
+       sc_lfs_stream_write(value,sizeof(*value))<0)result=-1;
+    if(sc_lfs_stream_close()<0)result=-1;
+    if(result<0){sc_lfs_remove(CFG_TEMP_FILE);return ESP_FAIL;}
+    if(sc_lfs_rename(CFG_TEMP_FILE,CFG_FILE)<0){sc_lfs_remove(CFG_TEMP_FILE);return ESP_FAIL;}
+    return ESP_OK;
+}
+
+static esp_err_t load_file(void){
+    cfg_file_header_t header;
+    size_t n=0;
+    if(sc_lfs_read_range(CFG_FILE,0,&header,sizeof(header),&n)<0||
+       n!=sizeof(header)||header.magic!=CFG_FILE_MAGIC||
+       header.version!=CFG_VERSION||header.size!=sizeof(cfg))return ESP_ERR_NOT_FOUND;
+    uint8_t chunk[128],extra;
+    uint32_t hash=2166136261U;
+    size_t offset=0;
+    while(offset<sizeof(cfg)){
+        size_t want=sizeof(cfg)-offset;
+        if(want>sizeof(chunk))want=sizeof(chunk);
+        if(sc_lfs_read_range(CFG_FILE,sizeof(header)+offset,chunk,want,&n)<0||n!=want)
+            return ESP_ERR_INVALID_CRC;
+        hash=hash_update(hash,chunk,n);
+        offset+=n;
+    }
+    if(hash!=header.hash||
+       sc_lfs_read_range(CFG_FILE,sizeof(header)+sizeof(cfg),&extra,1,&n)<0||n)
+        return ESP_ERR_INVALID_CRC;
+    if(sc_lfs_read_range(CFG_FILE,sizeof(header),&cfg,sizeof(cfg),&n)<0||
+       n!=sizeof(cfg)||cfg.version!=CFG_VERSION)return ESP_ERR_INVALID_CRC;
+    return ESP_OK;
+}
 
 static void cpy(char *dst, size_t n, const char *src){ if(!src)src=""; snprintf(dst,n,"%s",src); }
 static void default_controller_id(char out[13]){
@@ -67,37 +129,74 @@ void sc_config_defaults(sc_config_t *c){
     c->temp_control.buffer_c=8.0f;
 }
 
-static esp_err_t persist_locked(void){
-    nvs_handle h; esp_err_t e=nvs_open("smartcfg",NVS_READWRITE,&h); if(e!=ESP_OK)return e;
-    e=nvs_set_blob(h,"config",&cfg,sizeof(cfg)); if(e==ESP_OK)e=nvs_commit(h); nvs_close(h); return e;
-}
-
 esp_err_t sc_config_init(void){
     lock=xSemaphoreCreateMutex(); if(!lock)return ESP_ERR_NO_MEM;
     sc_config_defaults(&cfg); nvs_handle h; esp_err_t e=nvs_open("smartcfg",NVS_READONLY,&h);
     if(e==ESP_OK){
         size_t n=0;e=nvs_get_blob(h,"config",NULL,&n);
-        if(e==ESP_OK&&(n==sizeof(cfg)||n==offsetof(sc_config_t,web_user)||n==offsetof(sc_config_t,modbus_unit_id)||n==offsetof(sc_config_t,input_count)||n==offsetof(sc_config_t,timer_schedule))){size_t got=n;e=nvs_get_blob(h,"config",&cfg,&got);}
+        if(e==ESP_OK&&(n==sizeof(cfg)||n==offsetof(sc_config_t,automation)||n==offsetof(sc_config_t,web_user)||n==offsetof(sc_config_t,modbus_unit_id)||n==offsetof(sc_config_t,input_count)||n==offsetof(sc_config_t,timer_schedule))){size_t got=n;e=nvs_get_blob(h,"config",&cfg,&got);}
         nvs_close(h);
         if(e==ESP_OK&&n==sizeof(cfg)&&cfg.version==CFG_VERSION){ESP_LOGI(TAG,"loaded configuration");return ESP_OK;}
+        if(e==ESP_OK&&n==offsetof(sc_config_t,automation)&&cfg.version==CFG_VERSION_V6){
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v6 to v7");return ESP_OK;
+        }
         if(e==ESP_OK&&n==offsetof(sc_config_t,web_user)&&cfg.version==CFG_VERSION_V5){
-            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v5 to v6");return persist_locked();
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v5 to v7");return ESP_OK;
         }
         if(e==ESP_OK&&n==offsetof(sc_config_t,modbus_unit_id)&&cfg.version==CFG_VERSION_V4){
-            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v4 to v6");return persist_locked();
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v4 to v7");return ESP_OK;
         }
         if(e==ESP_OK&&n==offsetof(sc_config_t,input_count)&&cfg.version==CFG_VERSION_V3){
-            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v3 to v6");return persist_locked();
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v3 to v7");return ESP_OK;
         }
         if(e==ESP_OK&&n==offsetof(sc_config_t,timer_schedule)&&cfg.version==CFG_VERSION_V2){
             for(int i=0;i<SC_MAX_TIMERS;i++){uint32_t duration=cfg.timer[i].duration_sec;cfg.timer_schedule[i].duration_hours=duration/3600;cfg.timer_schedule[i].duration_minutes=(duration%3600)/60;uint32_t end=cfg.timer[i].start_hour*60+cfg.timer[i].start_minute+duration/60;cfg.timer_schedule[i].end_hour=(end/60)%24;cfg.timer_schedule[i].end_minute=end%60;}
-            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v2 to v6");return persist_locked();
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v2 to v7");return ESP_OK;
         }
     }
     sc_config_defaults(&cfg);
-    ESP_LOGW(TAG,"using defaults"); return persist_locked();
+    ESP_LOGW(TAG,"using defaults"); return ESP_OK;
+}
+
+esp_err_t sc_config_storage_ready(void){
+    xSemaphoreTake(lock,portMAX_DELAY);
+    esp_err_t e=load_file();
+    if(e==ESP_OK)ESP_LOGI(TAG,"loaded filesystem configuration");
+    else{
+        e=persist_file(&cfg);
+        if(e==ESP_OK)ESP_LOGI(TAG,"migrated configuration storage to LittleFS");
+    }
+    storage_ready=e==ESP_OK;
+    xSemaphoreGive(lock);
+    return e;
 }
 void sc_config_snapshot(sc_config_t *out){ xSemaphoreTake(lock,portMAX_DELAY); *out=cfg; xSemaphoreGive(lock); }
 const sc_config_t *sc_config_acquire(void){ xSemaphoreTake(lock,portMAX_DELAY); return &cfg; }
 void sc_config_release(void){ xSemaphoreGive(lock); }
-esp_err_t sc_config_replace(const sc_config_t *in){ if(!in)return ESP_ERR_INVALID_ARG; xSemaphoreTake(lock,portMAX_DELAY); cfg=*in; cfg.version=CFG_VERSION; esp_err_t e=persist_locked(); xSemaphoreGive(lock); return e; }
+esp_err_t sc_config_replace(const sc_config_t *in){if(!in||in->version!=CFG_VERSION)return ESP_ERR_INVALID_ARG;xSemaphoreTake(lock,portMAX_DELAY);esp_err_t e=storage_ready?persist_file(in):ESP_ERR_INVALID_STATE;if(e==ESP_OK)cfg=*in;else ESP_LOGE(TAG,"configuration save failed: %s",esp_err_to_name(e));xSemaphoreGive(lock);return e;}
+
+esp_err_t sc_config_set_relay_timing(uint8_t relay, bool ttl,
+                                     uint32_t seconds)
+{
+    if (relay >= SC_MAX_RELAYS) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (relay >= cfg.relay_count) {
+        xSemaphoreGive(lock);
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint32_t *value = ttl ? &cfg.relay[relay].ttl_sec
+                          : &cfg.relay[relay].tta_sec;
+    if (*value == seconds) {
+        xSemaphoreGive(lock);
+        return ESP_OK;
+    }
+    uint32_t previous = *value;
+    *value = seconds;
+    esp_err_t err = storage_ready ? persist_file(&cfg) : ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) {
+        *value = previous;
+        ESP_LOGE(TAG, "relay timing save failed: %s", esp_err_to_name(err));
+    }
+    xSemaphoreGive(lock);
+    return err;
+}

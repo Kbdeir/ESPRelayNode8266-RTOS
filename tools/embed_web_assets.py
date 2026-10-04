@@ -13,6 +13,7 @@ ASSETS = (
     ("sc_temperature_html", "AdvancedTemperatureConf.html"),
     ("sc_timer_html", "Timer1.html"),
     ("sc_timer_saved_html", "savetimer.html"),
+    ("sc_automation_html", "Automation.html"),
     ("sc_files_html", "Files.html"),
     ("sc_backup_html", "Backup.html"),
     ("sc_coredump_html", "coredump.html"),

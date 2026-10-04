@@ -15,11 +15,9 @@
 typedef struct {
     uint8_t ds_active, gpio1, gpio2, relay_count;
     sc_temp_control_config_t temp_control;
-    char temp_topic1[SC_TOPIC_LEN], temp_topic2[SC_TOPIC_LEN];
     struct {
         uint8_t enabled, model;
         uint16_t zero;
-        char topic[SC_TOPIC_LEN];
     } relay[SC_MAX_RELAYS];
 } sensor_config_t;
 
@@ -35,14 +33,21 @@ static void load_config(void)
     sensor_cfg.gpio2 = cfg->ds18b20_second_gpio;
     sensor_cfg.relay_count = cfg->relay_count <= SC_MAX_RELAYS ? cfg->relay_count : SC_MAX_RELAYS;
     sensor_cfg.temp_control = cfg->temp_control;
-    snprintf(sensor_cfg.temp_topic1, sizeof(sensor_cfg.temp_topic1), "%s", cfg->temp_topic1);
-    snprintf(sensor_cfg.temp_topic2, sizeof(sensor_cfg.temp_topic2), "%s", cfg->temp_topic2);
     for (int i = 0; i < sensor_cfg.relay_count; i++) {
         sensor_cfg.relay[i].enabled = cfg->relay[i].acs_enabled;
         sensor_cfg.relay[i].model = cfg->relay[i].acs_model_amps;
         sensor_cfg.relay[i].zero = cfg->relay[i].acs_zero;
-        snprintf(sensor_cfg.relay[i].topic, sizeof(sensor_cfg.relay[i].topic), "%s", cfg->relay[i].acs_topic);
     }
+    sc_config_release();
+}
+
+static void copy_sensor_topic(char *out, size_t size, int relay)
+{
+    const sc_config_t *cfg = sc_config_acquire();
+    const char *topic = relay < 0 ? cfg->temp_topic1
+                        : relay == SC_MAX_RELAYS ? cfg->temp_topic2
+                        : cfg->relay[relay].acs_topic;
+    snprintf(out, size, "%s", topic);
     sc_config_release();
 }
 
@@ -205,8 +210,10 @@ static void task(void *arg)
             amps = acs_read_rms(sensor_cfg.relay[i].model, zero);
             amps_valid = true;
             char value[24];
+            char topic[SC_TOPIC_LEN];
             snprintf(value, sizeof(value), "%.2f", amps);
-            sc_mqtt_publish_qos0(sensor_cfg.relay[i].topic, value, true);
+            copy_sensor_topic(topic, sizeof(topic), i);
+            sc_mqtt_publish_qos0(topic, value, true);
             break;
         }
 
@@ -220,17 +227,22 @@ static void task(void *arg)
         snap.temp_control_enabled = sensor_cfg.temp_control.enabled;
         if (control_call >= 0) snap.temp_control_call = control_call != 0;
         snap.temp_delta_c = temp2_valid && temp1_valid ? temp2 - temp1 : 0.0f;
+        snap.updated_us = esp_timer_get_time();
         xSemaphoreGive(mux);
 
         if (temp1_valid) {
             char value[24];
+            char topic[SC_TOPIC_LEN];
             snprintf(value, sizeof(value), "%.2f", temp1);
-            sc_mqtt_publish_qos0(sensor_cfg.temp_topic1, value, true);
+            copy_sensor_topic(topic, sizeof(topic), -1);
+            sc_mqtt_publish_qos0(topic, value, true);
         }
         if (temp2_valid) {
             char value[24];
+            char topic[SC_TOPIC_LEN];
             snprintf(value, sizeof(value), "%.2f", temp2);
-            sc_mqtt_publish_qos0(sensor_cfg.temp_topic2, value, true);
+            copy_sensor_topic(topic, sizeof(topic), SC_MAX_RELAYS);
+            sc_mqtt_publish_qos0(topic, value, true);
         }
         vTaskDelay(pdMS_TO_TICKS(1500));
     }
@@ -238,6 +250,13 @@ static void task(void *arg)
 
 esp_err_t sc_sensors_init(void)
 {
+    bool needed;
+    const sc_config_t *cfg = sc_config_acquire();
+    needed = cfg->ds18b20_active || cfg->temp_control.enabled;
+    for (uint8_t i = 0; !needed && i < cfg->relay_count && i < SC_MAX_RELAYS; i++)
+        needed = cfg->relay[i].acs_enabled;
+    sc_config_release();
+    if (!needed) return ESP_OK;
     mux = xSemaphoreCreateMutex();
     if (!mux) return ESP_ERR_NO_MEM;
     return xTaskCreate(task, "sensors", 2304, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
@@ -246,6 +265,10 @@ esp_err_t sc_sensors_init(void)
 void sc_sensors_snapshot(sc_sensor_snapshot_t *out)
 {
     if (!out) return;
+    if (!mux) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     xSemaphoreTake(mux, portMAX_DELAY);
     *out = snap;
     xSemaphoreGive(mux);

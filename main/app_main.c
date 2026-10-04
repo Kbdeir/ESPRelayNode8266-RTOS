@@ -15,6 +15,7 @@
 #include "sc_modbus.h"
 #include "sc_ha.h"
 #include "sc_diag.h"
+#include "sc_automation.h"
 static const char *TAG="smartconfig";
 void app_main(void){
  esp_err_t err=nvs_flash_init();
@@ -23,11 +24,13 @@ void app_main(void){
  ESP_ERROR_CHECK(sc_config_init());
  ESP_ERROR_CHECK(sc_health_init());
  ESP_ERROR_CHECK(sc_diag_init());
+ ESP_ERROR_CHECK(sc_webfs_init());
+ ESP_ERROR_CHECK(sc_config_storage_ready());
  ESP_ERROR_CHECK(sc_relay_init());
  ESP_ERROR_CHECK(sc_status_led_init());
- ESP_ERROR_CHECK(sc_webfs_init());
  ESP_ERROR_CHECK(sc_wifi_init());
  ESP_ERROR_CHECK(sc_time_init());
+ ESP_ERROR_CHECK(sc_automation_init());
  ESP_ERROR_CHECK(sc_mqtt_init());
  ESP_ERROR_CHECK(sc_inputs_init());
  ESP_ERROR_CHECK(sc_sensors_init());

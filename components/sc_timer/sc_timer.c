@@ -16,6 +16,7 @@ static uint32_t last_min_key[SC_MAX_TIMERS];
 static uint8_t active_relay[SC_MAX_TIMERS];
 static bool relay_paused[SC_MAX_RELAYS];
 static SemaphoreHandle_t timer_lock;
+__attribute__((weak)) void sc_automation_tick(void) {}
 
 static int date_key(const char *value)
 {
@@ -169,6 +170,7 @@ static void timer_task(void *arg)
 
         xSemaphoreGive(timer_lock);
         sc_config_release();
+        sc_automation_tick();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
