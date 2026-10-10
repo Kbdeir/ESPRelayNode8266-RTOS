@@ -27,6 +27,9 @@ Acceptance:
 - HTTP remains responsive while MQTT is offline
 - local relay and Modbus control remain functional while MQTT is offline
 - configuration survives repeated Wi-Fi and MQTT reconnections
+- Modbus remote sensor values recover after slave loss and become stale after 300 seconds without a valid response
+- largest free heap block recovers after Modbus poll connections close
+- outbound Modbus coil writes recover after destination loss without blocking rule evaluation
 - filesystem stays mountable and files remain intact
 - timer state remains correct after network outages
 
@@ -39,10 +42,14 @@ During a separate 24 hour run:
 3. Open and close the LiveReadings, Files and Backup pages repeatedly from several browser sessions, while respecting the configured HTTP socket cap.
 4. Disconnect a DS18B20 probe and reconnect it. Sensor failure must not block other tasks.
 5. Exercise Modbus clients that connect, stop transmitting, and disconnect unexpectedly. Receive timeouts must recover the server.
-6. Attempt malformed file-manager, restore, timer and relay requests. Invalid input must not change persisted configuration.
-7. Upload a deliberately invalid OTA image. The currently running image must remain the selected boot image.
-8. Complete one valid OTA update, reboot, and confirm configuration/LittleFS survival.
-9. Trigger an abnormal reset in a controlled test build and verify that the crash-diagnostics page reports the reset class after reboot.
+6. Poll an external Modbus slave from two automation sensor slots; verify signed/float decoding, word order, timeout backoff, and rule evaluation while the slave is unplugged and reconnected.
+   Configure one rule to write a coil on another board. Verify the matched
+   and cleared states, unit ID and zero-based address; disconnect the target
+   for several minutes and confirm a queued write is retried after recovery.
+7. Attempt malformed file-manager, restore, timer and relay requests. Invalid input must not change persisted configuration.
+8. Upload a deliberately invalid OTA image. The currently running image must remain the selected boot image.
+9. Complete one valid OTA update, reboot, and confirm configuration/LittleFS survival.
+10. Trigger an abnormal reset in a controlled test build and verify that the crash-diagnostics page reports the reset class after reboot.
 
 ## Stage 3 - 30 day qualification
 

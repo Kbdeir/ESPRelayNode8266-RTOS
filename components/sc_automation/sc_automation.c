@@ -31,6 +31,12 @@ typedef struct {
 static rule_runtime_t runtime[SC_MAX_AUTOMATION_RULES];
 static remote_runtime_t remote[SC_MAX_REMOTE_SENSORS];
 static const char *TAG = "automation";
+static sc_modbus_rule_sender_t modbus_sender;
+
+void sc_automation_set_modbus_sender(sc_modbus_rule_sender_t sender)
+{
+    modbus_sender = sender;
+}
 
 static bool source_valid(uint8_t source)
 {
@@ -39,9 +45,11 @@ static bool source_valid(uint8_t source)
             source <= SC_AUTOMATION_SOURCE_REMOTE8);
 }
 
-static bool rule_valid(const sc_automation_rule_t *rule, uint8_t relay_count)
+static bool rule_valid(const sc_automation_rule_t *rule,
+                       const sc_modbus_rule_target_t *target,
+                       uint8_t relay_count)
 {
-    if (!rule || rule->target_relay >= relay_count ||
+    if (!rule || (!target->remote && rule->target_relay >= relay_count) ||
         rule->action > SC_AUTOMATION_ACTION_TOGGLE ||
         rule->logic > SC_AUTOMATION_LOGIC_OR ||
         rule->trigger_mode > SC_AUTOMATION_PERIODIC ||
@@ -52,7 +60,9 @@ static bool rule_valid(const sc_automation_rule_t *rule, uint8_t relay_count)
         !source_valid(rule->condition[1].source) ||
         rule->condition[1].op > SC_AUTOMATION_EQUAL)
         return false;
-    return !(rule->trigger_mode == SC_AUTOMATION_PERIODIC &&
+    if (target->remote && (!target->ipv4 || !target->port || !target->unit ||
+                           target->unit > 247)) return false;
+    return !((rule->trigger_mode == SC_AUTOMATION_PERIODIC || target->remote) &&
              rule->action == SC_AUTOMATION_ACTION_TOGGLE);
 }
 
@@ -127,8 +137,16 @@ static bool read_source(uint8_t source, const sc_sensor_snapshot_t *sensors,
     return false;
 }
 
-static bool apply_action(const sc_automation_rule_t *rule, bool result)
+static bool apply_action(uint8_t index, const sc_automation_rule_t *rule,
+                         const sc_modbus_rule_target_t *target, bool result)
 {
+    if (target->remote) {
+        if (!modbus_sender) return false;
+        if (!result && !target->send_clear)
+            return modbus_sender(index, NULL, false);
+        bool desired = rule->action == SC_AUTOMATION_ACTION_ON ? result : !result;
+        return modbus_sender(index, target, desired);
+    }
     sc_relay_cmd_t command = {.relay = rule->target_relay};
     if (rule->action == SC_AUTOMATION_ACTION_TOGGLE) {
         command.op = SC_RELAY_TOGGLE;
@@ -166,11 +184,21 @@ void sc_automation_reset_remote(uint8_t index)
     taskEXIT_CRITICAL();
 }
 
+void sc_automation_remote_value(uint8_t index, float value)
+{
+    if (index >= SC_MAX_REMOTE_SENSORS || !isfinite(value)) return;
+    taskENTER_CRITICAL();
+    remote[index].value = value;
+    remote[index].seen_us = esp_timer_get_time();
+    taskEXIT_CRITICAL();
+}
+
 void sc_automation_tick(void)
 {
     sc_sensor_snapshot_t sensors;
     sc_input_status_t inputs[SC_MAX_INPUTS];
     sc_automation_rule_t rules[SC_MAX_AUTOMATION_RULES];
+    sc_modbus_rule_target_t targets[SC_MAX_AUTOMATION_RULES];
     bool remote_configured[SC_MAX_REMOTE_SENSORS];
     uint8_t relay_count;
     sc_sensors_snapshot(&sensors);
@@ -179,6 +207,7 @@ void sc_automation_tick(void)
     const sc_config_t *config = sc_config_acquire();
     relay_count = config->relay_count <= SC_MAX_RELAYS ? config->relay_count : SC_MAX_RELAYS;
     memcpy(rules, config->automation, sizeof(rules));
+    memcpy(targets, config->modbus_rule, sizeof(targets));
     for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++)
         remote_configured[i] = config->remote_sensor[i].topic[0] != 0;
     sc_config_release();
@@ -191,7 +220,8 @@ void sc_automation_tick(void)
     }
     for (uint8_t i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
         sc_automation_rule_t *rule = &rules[i];
-        if (!rule->enabled || !rule_valid(rule, relay_count)) {
+        if (!rule->enabled || !rule_valid(rule, &targets[i], relay_count)) {
+            if (modbus_sender) modbus_sender(i, NULL, false);
             sc_automation_reset_rule(i);
             continue;
         }
@@ -212,6 +242,7 @@ void sc_automation_tick(void)
             read_source(rule->condition[1].source, &sensors, inputs, relay_count,
                         remote_configured, now_us, &value1);
         if (!available0 || !available1) {
+            if (modbus_sender) modbus_sender(i, NULL, false);
             taskENTER_CRITICAL();
             runtime[i].initialized = false;
             runtime[i].source_available = false;
@@ -235,6 +266,8 @@ void sc_automation_tick(void)
         current.source_available = true;
         current.gate_open = gate_open;
         if (!current.initialized || current.last_result != result) {
+            if (targets[i].remote && modbus_sender)
+                modbus_sender(i, NULL, false);
             current.initialized = true;
             current.last_result = result;
             current.fired_for_state = false;
@@ -249,13 +282,15 @@ void sc_automation_tick(void)
         bool should_fire = ready &&
             (rule->trigger_mode == SC_AUTOMATION_PERIODIC ||
              !current.fired_for_state);
-        if (should_fire && apply_action(rule, result)) {
+        if (should_fire && apply_action(i, rule, &targets[i], result)) {
             current.last_fired_us = now_us;
             if (rule->trigger_mode == SC_AUTOMATION_ON_CHANGE)
                 current.fired_for_state = true;
-            ESP_LOGI(TAG, "rule %u %s, relay %u action %u",
+            ESP_LOGI(TAG, "rule %u %s, %s %u action %u",
                      (unsigned)(i + 1), result ? "matched" : "cleared",
-                     (unsigned)rule->target_relay, (unsigned)rule->action);
+                     targets[i].remote ? "coil" : "relay",
+                     (unsigned)(targets[i].remote ? targets[i].address :
+                                rule->target_relay), (unsigned)rule->action);
         }
         taskENTER_CRITICAL();
         runtime[i] = current;
@@ -370,6 +405,7 @@ bool sc_automation_remote_message(const char *topic, size_t topic_len,
     char key[SC_REMOTE_KEY_LEN] = {0};
     const sc_config_t *config = sc_config_acquire();
     for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
+        if (config->remote_transport[i] != SC_REMOTE_MQTT) continue;
         const char *configured = config->remote_sensor[i].topic;
         size_t configured_len = strlen(configured);
         if (configured_len == topic_len &&
@@ -393,9 +429,6 @@ bool sc_automation_remote_message(const char *topic, size_t topic_len,
         ESP_LOGW(TAG, "remote sensor %d payload could not be parsed", matched + 1);
         return true;
     }
-    taskENTER_CRITICAL();
-    remote[matched].value = value;
-    remote[matched].seen_us = esp_timer_get_time();
-    taskEXIT_CRITICAL();
+    sc_automation_remote_value((uint8_t)matched, value);
     return true;
 }

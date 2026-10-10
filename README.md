@@ -58,20 +58,22 @@ It contains the web pages used by the port:
 board_build.filesystem = littlefs
 ```
 
-The firmware also carries minimal compiled recovery copies of the core web pages.
-At boot they are written only when the corresponding LittleFS file is missing. This
-means a firmware-only flash still provides a recovery UI; uploading the filesystem
-image replaces those recovery pages with the files in `data/`.
-
-PlatformIO filesystem tasks are available through the ESP8266 platform:
-
-```bash
-pio run -t buildfs
-pio run -t uploadfs
-```
+The firmware also carries compiled recovery copies of the core web pages.
+At boot, it seeds missing pages and replaces pages that differ from those
+copies. A firmware-only serial flash therefore still provides the web UI.
+Build a 2 MiB LittleFS image with `pio run -e huzzah_rtos -t buildfs`.
+The project supplies the filesystem geometry from `partitions.csv`, since
+the ESP8266 RTOS linker script does not expose PlatformIO's Arduino-style
+filesystem symbols. To upload the web pages over serial, close the monitor
+and run `pio run -e huzzah_rtos -t uploadfs --upload-port COM3` (substitute
+your board's port). The project-owned upload action reads and saves a full
+4 MiB flash backup under `.pio/flash-backups/`, confirms the partition table,
+and merges `data/` into the existing LittleFS image. It verifies that files
+outside `data/`, including `.smartcfg`, remain unchanged before writing only
+the `webfs` partition. If backup, mount, or repack fails, it does not flash.
 
 The filesystem partition is `webfs` in `partitions.csv` and occupies
-`0x290000..0x3FFFFF` on the 4 MB flash device.
+`0x200000..0x3FFFFF` (2 MiB) on the 4 MB flash device.
 
 ## Implemented modules
 
@@ -81,11 +83,13 @@ The filesystem partition is `webfs` in `partitions.csv` and occupies
 - relay command queue / single GPIO owner
 - schedule timers
 - Modbus/TCP relay coils
+- automation rules with local, MQTT, or Modbus TCP sensor conditions,
+  and local relay or outbound Modbus TCP coil actions
 - DS18B20 acquisition task
 - ACS712 acquisition task
 - NTP/time service
 - LittleFS web filesystem
-- configuration persistence in NVS
+- configuration persistence in LittleFS with migration from older NVS data
 - web configuration/status endpoints
 - file manager
 - backup / restore
@@ -112,7 +116,26 @@ See `partitions.csv`:
 - OTA slot 1
 - LittleFS `webfs`
 
-The layout is sized for a 4 MB HUZZAH flash device.
+The layout is sized for a 4 MB HUZZAH flash device. Each OTA app slot is
+0xF0000 bytes (960 KiB). ESP8266 maps only 1 MiB of flash during early app
+startup, so both slots must end before their mapped window boundary. The
+firmware uses size optimization and PlatformIO enforces the 960 KiB limit.
+LittleFS occupies the last 2 MiB at 0x200000.
+
+**Do not deploy a partition-layout change over OTA.** The 1-to-2 MiB LittleFS
+expansion moves its start from 0x300000 to 0x200000. Flash the partition table,
+firmware, and a matching 2 MiB LittleFS image together over serial. A firmware-
+only upload cannot migrate the old filesystem. A fresh filesystem replaces all
+files stored there, including `.smartcfg`; NVS is not erased.
+Remote Modbus sensors are configured in Automation > Remote Sensors using a
+zero-based address, function code 01/02/03/04, value type, scale, and poll rate.
+For an outbound rule action, select Modbus TCP coil as the rule output and
+enter the destination IPv4, TCP port, unit ID, and zero-based coil address.
+The rule sends function code 05 (Write Single Coil). By default it writes
+the opposite state when the condition clears; this can be disabled per rule.
+Failed writes are retried every five seconds while the rule state remains
+current. The destination must accept function code 05 and be reachable over
+the board's Wi-Fi network.
 
 ## Build validation
 

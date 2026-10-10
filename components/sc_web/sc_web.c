@@ -11,6 +11,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "lwip/inet.h"
 #include "cJSON.h"
 #include "sc_config.h"
 #include "sc_health.h"
@@ -26,6 +27,7 @@
 #include "sc_ota.h"
 #include "sc_ha.h"
 #include "sc_automation.h"
+#include "sc_modbus.h"
 #include "sc_web.h"
 
 #define httpd_resp_sendstr(req, str) httpd_resp_send((req), (str), -1)
@@ -109,12 +111,32 @@ static bool json_string_field(char*out,size_t cap,size_t*off,const char*key,cons
 static esp_err_t js(httpd_req_t*r,cJSON*j){char*s=cJSON_PrintUnformatted(j);httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");esp_err_t e=httpd_resp_sendstr(r,s?s:"{}");free(s);cJSON_Delete(j);return e;}
 static int hex_value(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
 static void form_url_decode(char*s){char*read=s,*write=s;while(*read){if(*read=='+'){*write++=' ';read++;continue;}if(*read=='%'&&read[1]&&read[2]){int high=hex_value(read[1]),low=hex_value(read[2]);if(high>=0&&low>=0){*write++=(char)((high<<4)|low);read+=3;continue;}}*write++=*read++;}*write=0;}
-static void qstr(const char*q,const char*key,char*dst,size_t cap){char t[320];if(httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK){form_url_decode(t);snprintf(dst,cap,"%s",t);}}static int qint(const char*q,const char*key,int cur){char t[24];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?atoi(t):cur;}static uint32_t qu32(const char*q,const char*key,uint32_t cur){char t[24],*end=NULL;if(httpd_query_key_value(q,key,t,sizeof(t))!=ESP_OK)return cur;if(t[0]=='-')return 0;unsigned long long value=strtoull(t,&end,10);if(!t[0]||!end||*end)return cur;return value>UINT32_MAX?UINT32_MAX:(uint32_t)value;}static float qfloat(const char*q,const char*key,float cur){char t[32];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?(float)atof(t):cur;}
+static void qstr(const char*q,const char*key,char*dst,size_t cap){char t[320];if(cap&&httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK){form_url_decode(t);size_t n=strlen(t);if(n>=cap)n=cap-1;memcpy(dst,t,n);dst[n]=0;}}static int qint(const char*q,const char*key,int cur){char t[24];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?atoi(t):cur;}static uint32_t qu32(const char*q,const char*key,uint32_t cur){char t[24],*end=NULL;if(httpd_query_key_value(q,key,t,sizeof(t))!=ESP_OK)return cur;if(t[0]=='-')return 0;unsigned long long value=strtoull(t,&end,10);if(!t[0]||!end||*end)return cur;return value>UINT32_MAX?UINT32_MAX:(uint32_t)value;}static float qfloat(const char*q,const char*key,float cur){char t[32];return httpd_query_key_value(q,key,t,sizeof(t))==ESP_OK?(float)atof(t):cur;}
 static bool qcondition_value(const char*q,const char*key,float*out){char t[32];if(!out||httpd_query_key_value(q,key,t,sizeof(t))!=ESP_OK)return false;form_url_decode(t);char*start=t;while(isspace((unsigned char)*start))start++;char*last=start+strlen(start);while(last>start&&isspace((unsigned char)last[-1]))*--last=0;if(!strcasecmp(start,"on")||!strcasecmp(start,"true")||!strcasecmp(start,"yes")){*out=1.0f;return true;}if(!strcasecmp(start,"off")||!strcasecmp(start,"false")||!strcasecmp(start,"no")){*out=0.0f;return true;}char*end=NULL;float value=strtof(start,&end);if(!start[0]||end==start||*end||!isfinite(value))return false;*out=value;return true;}
 static bool query_has(const char*q,const char*key);
 static bool valid_publish_topic(const char *topic) {
   return topic && topic[0] && strlen(topic) < SC_TOPIC_LEN &&
          !strchr(topic, '#') && !strchr(topic, '+');
+}
+static bool valid_modbus_host(const char *host) {
+  struct in_addr address;
+  return host && inet_aton(host, &address) &&
+         address.s_addr != INADDR_ANY &&
+         address.s_addr != INADDR_BROADCAST &&
+         (ntohl(address.s_addr) >> 24) != 127;
+}
+static bool valid_modbus_settings(const char *host,
+                                  const sc_remote_modbus_config_t *m) {
+  return valid_modbus_host(host) && m->port && m->unit >= 1 && m->unit <= 247 &&
+         m->function >= 1 && m->function <= 4 &&
+         m->value_type <= SC_MODBUS_F32 && m->word_order <= 3 &&
+         m->poll_sec >= 5 && m->poll_sec <= SC_REMOTE_STALE_SEC &&
+         isfinite(m->scale) && isfinite(m->offset) &&
+         (m->function > 2 || m->value_type == SC_MODBUS_BOOL) &&
+         (m->function <= 2 || m->value_type != SC_MODBUS_BOOL) &&
+         (m->function <= 2 ||
+          (uint32_t)m->address +
+          (m->value_type >= SC_MODBUS_U32 ? 2U : 1U) <= 65536U);
 }
 static bool safe_path(const char*p){return p&&p[0]=='/'&&p[1]!='.'&&!strstr(p,"..")&&strlen(p)<SC_LFS_NAME_MAX;}
 static esp_err_t recv_body(httpd_req_t*r,char*b,size_t cap){if(r->content_len<=0||r->content_len>=(int)cap){send_error(r,HTTPD_400,"invalid body size");return ESP_FAIL;}int got=0;while(got<r->content_len){int n=httpd_req_recv(r,b+got,r->content_len-got);if(n<=0)return ESP_FAIL;got+=n;}b[got]=0;return ESP_OK;}
@@ -230,16 +252,26 @@ static esp_err_t automation_get(httpd_req_t *r)
       httpd_resp_send_chunk(r, chunk, n) != ESP_OK) return ESP_FAIL;
   for (uint8_t i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
     sc_automation_rule_t rule_value;
+    sc_modbus_rule_target_t target_value;
     config = sc_config_acquire();
     rule_value = config->automation[i];
+    target_value = config->modbus_rule[i];
     sc_config_release();
     const sc_automation_rule_t *rule = &rule_value;
+    const sc_modbus_rule_target_t *target = &target_value;
+    char host[16] = "";
+    if (target->ipv4) {
+      struct in_addr address = {.s_addr = target->ipv4};
+      snprintf(host, sizeof(host), "%s", inet_ntoa(address));
+    }
     sc_automation_status_t status;
     sc_automation_status(i, &status);
     n = snprintf(chunk, sizeof(chunk),
       "%s{\"id\":%u,\"enabled\":%s,\"target\":%u,\"action\":%u,"
       "\"logic\":%u,\"trigger\":%u,\"gate\":%u,\"hold\":%u,"
-      "\"cooldown\":%u,\"conditions\":[{\"source\":%u,\"op\":%u,"
+      "\"cooldown\":%u,\"output\":%u,\"mbHost\":\"%s\",\"mbPort\":%u,"
+      "\"mbUnit\":%u,\"mbAddress\":%u,\"mbClear\":%u,"
+      "\"conditions\":[{\"source\":%u,\"op\":%u,"
       "\"value1\":%.6g,\"value2\":%.6g},{\"source\":%u,\"op\":%u,"
       "\"value1\":%.6g,\"value2\":%.6g}],\"status\":{"
       "\"available\":%s,\"gateOpen\":%s,\"matched\":%s,"
@@ -249,6 +281,9 @@ static esp_err_t automation_get(httpd_req_t *r)
       (unsigned)rule->logic, (unsigned)rule->trigger_mode,
       (unsigned)rule->gate_timer, (unsigned)rule->hold_sec,
       (unsigned)rule->cooldown_sec,
+      (unsigned)target->remote, host, (unsigned)target->port,
+      (unsigned)target->unit, (unsigned)target->address,
+      (unsigned)target->send_clear,
       (unsigned)rule->condition[0].source, (unsigned)rule->condition[0].op,
       (double)rule->condition[0].value1, (double)rule->condition[0].value2,
       (unsigned)rule->condition[1].source, (unsigned)rule->condition[1].op,
@@ -263,8 +298,10 @@ static esp_err_t automation_get(httpd_req_t *r)
   if (httpd_resp_send_chunk(r, "],\"remotes\":[", 13) != ESP_OK) return ESP_FAIL;
   for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
     sc_remote_sensor_config_t remote_config;
+    uint8_t transport;
     config = sc_config_acquire();
     remote_config = config->remote_sensor[i];
+    transport = config->remote_transport[i];
     sc_config_release();
     sc_remote_sensor_status_t status;
     sc_automation_remote_status(i, &status);
@@ -272,14 +309,30 @@ static esp_err_t automation_get(httpd_req_t *r)
     char key[SC_REMOTE_KEY_LEN * 6 + 1];
     char label[SC_REMOTE_LABEL_LEN * 6 + 1];
     json_escape(topic, sizeof(topic), remote_config.topic);
-    json_escape(key, sizeof(key), remote_config.json_key);
     json_escape(label, sizeof(label), remote_config.label);
-    n = snprintf(chunk, sizeof(chunk),
-      "%s{\"id\":%u,\"topic\":\"%s\",\"jsonKey\":\"%s\","
-      "\"label\":\"%s\",\"valid\":%s,\"value\":%.6g,\"age\":%u}",
-      i ? "," : "", (unsigned)(i + 1), topic, key, label,
-      status.valid ? "true" : "false", (double)status.value,
-      (unsigned)status.age_sec);
+    if (transport == SC_REMOTE_MODBUS_TCP) {
+      sc_remote_modbus_config_t m;
+      sc_remote_modbus_decode(&remote_config, &m);
+      n = snprintf(chunk, sizeof(chunk),
+        "%s{\"id\":%u,\"transport\":1,\"host\":\"%s\",\"port\":%u,"
+        "\"unit\":%u,\"function\":%u,\"address\":%u,\"valueType\":%u,"
+        "\"wordOrder\":%u,\"poll\":%u,\"scale\":%.6g,\"offset\":%.6g,"
+        "\"label\":\"%s\",\"valid\":%s,\"value\":%.6g,\"age\":%u}",
+        i ? "," : "", (unsigned)(i + 1), topic, (unsigned)m.port,
+        (unsigned)m.unit, (unsigned)m.function, (unsigned)m.address,
+        (unsigned)m.value_type, (unsigned)m.word_order, (unsigned)m.poll_sec,
+        (double)m.scale, (double)m.offset, label,
+        status.valid ? "true" : "false", (double)status.value,
+        (unsigned)status.age_sec);
+    } else {
+      json_escape(key, sizeof(key), remote_config.json_key);
+      n = snprintf(chunk, sizeof(chunk),
+        "%s{\"id\":%u,\"transport\":0,\"topic\":\"%s\",\"jsonKey\":\"%s\","
+        "\"label\":\"%s\",\"valid\":%s,\"value\":%.6g,\"age\":%u}",
+        i ? "," : "", (unsigned)(i + 1), topic, key, label,
+        status.valid ? "true" : "false", (double)status.value,
+        (unsigned)status.age_sec);
+    }
     if (n < 0 || n >= (int)sizeof(chunk) ||
         httpd_resp_send_chunk(r, chunk, n) != ESP_OK) return ESP_FAIL;
   }
@@ -307,6 +360,26 @@ static esp_err_t automation_rule_save(httpd_req_t *r)
   sc_config_t c;
   sc_config_snapshot(&c);
   sc_automation_rule_t rule = {0};
+  sc_modbus_rule_target_t target = {0};
+  int output = qint(body, "output", 0);
+  int port = qint(body, "mbPort", 502);
+  int unit = qint(body, "mbUnit", 1);
+  int address = qint(body, "mbAddress", 0);
+  char host[16] = {0};
+  qstr(body, "mbHost", host, sizeof(host));
+  target.remote = output == 1;
+  target.send_clear = qint(body, "mbClear", 1) != 0;
+  if (target.remote) {
+    struct in_addr ip;
+    if (!valid_modbus_host(host) || !inet_aton(host, &ip) ||
+        port < 1 || port > 65535 || unit < 1 || unit > 247 ||
+        address < 0 || address > 65535)
+      return automation_reply(r, false, "Invalid Modbus target");
+    target.ipv4 = ip.s_addr;
+    target.port = port;
+    target.unit = unit;
+    target.address = address;
+  }
   rule.enabled = qint(body, "enabled", 0) != 0;
   rule.target_relay = qint(body, "target", 0);
   rule.action = qint(body, "action", 0);
@@ -325,7 +398,8 @@ static esp_err_t automation_rule_save(httpd_req_t *r)
   values_ok = qcondition_value(body, "c1value1", &rule.condition[1].value1) &&
               qcondition_value(body, "c1value2", &rule.condition[1].value2) &&
               values_ok;
-  if (rule.target_relay >= c.relay_count ||
+  if (output < 0 || output > 1 ||
+      (!target.remote && rule.target_relay >= c.relay_count) ||
       rule.action > SC_AUTOMATION_ACTION_TOGGLE ||
       rule.logic > SC_AUTOMATION_LOGIC_OR ||
       rule.trigger_mode > SC_AUTOMATION_PERIODIC ||
@@ -342,6 +416,8 @@ static esp_err_t automation_rule_save(httpd_req_t *r)
   if (rule.trigger_mode == SC_AUTOMATION_PERIODIC &&
       rule.action == SC_AUTOMATION_ACTION_TOGGLE)
     return automation_reply(r, false, "Periodic Toggle is not allowed");
+  if (target.remote && rule.action == SC_AUTOMATION_ACTION_TOGGLE)
+    return automation_reply(r, false, "Remote Toggle is not supported");
   if ((rule.condition[0].op == SC_AUTOMATION_BETWEEN &&
        rule.condition[0].value2 < rule.condition[0].value1) ||
       (rule.condition[1].source != SC_AUTOMATION_SOURCE_NONE &&
@@ -349,9 +425,13 @@ static esp_err_t automation_rule_save(httpd_req_t *r)
        rule.condition[1].value2 < rule.condition[1].value1))
     return automation_reply(r, false, "Between upper value must not be smaller");
   c.automation[index] = rule;
+  c.modbus_rule[index] = target;
   if (sc_config_replace(&c) != ESP_OK)
     return automation_reply(r, false, "Could not save rule");
   sc_automation_reset_rule(index);
+  sc_modbus_rule_submit(index, NULL, false);
+  if (target.remote && rule.enabled && sc_modbus_ensure_started() != ESP_OK)
+    return automation_reply(r, false, "Rule saved but Modbus task could not start");
   return automation_reply(r, true, "Rule saved");
 }
 
@@ -365,31 +445,69 @@ static esp_err_t automation_remote_save(httpd_req_t *r)
   sc_config_t c;
   sc_config_snapshot(&c);
   sc_remote_sensor_config_t remote = {0};
+  int transport = qint(body, "transport", 0);
+  if (transport != SC_REMOTE_MQTT && transport != SC_REMOTE_MODBUS_TCP)
+    return automation_reply(r, false, "Invalid sensor protocol");
   char topic[SC_REMOTE_TOPIC_LEN + 1] = {0};
   char json_key[SC_REMOTE_KEY_LEN + 1] = {0};
   char label[SC_REMOTE_LABEL_LEN + 1] = {0};
-  qstr(body, "topic", topic, sizeof(topic));
-  qstr(body, "jsonKey", json_key, sizeof(json_key));
+  qstr(body, transport == SC_REMOTE_MQTT ? "topic" : "host", topic, sizeof(topic));
+  if (transport == SC_REMOTE_MQTT)
+    qstr(body, "jsonKey", json_key, sizeof(json_key));
   qstr(body, "label", label, sizeof(label));
   if (strlen(topic) >= SC_REMOTE_TOPIC_LEN ||
       strlen(json_key) >= SC_REMOTE_KEY_LEN ||
       strlen(label) >= SC_REMOTE_LABEL_LEN)
     return automation_reply(r, false, "Remote sensor field is too long");
   memcpy(remote.topic, topic, strlen(topic) + 1);
-  memcpy(remote.json_key, json_key, strlen(json_key) + 1);
   memcpy(remote.label, label, strlen(label) + 1);
-  if (remote.topic[0] && !valid_publish_topic(remote.topic))
-    return automation_reply(r, false, "Invalid MQTT topic");
-  for (uint8_t i = 0; remote.topic[0] && i < SC_MAX_REMOTE_SENSORS; i++)
-    if (i != index && !strcmp(remote.topic, c.remote_sensor[i].topic))
-      return automation_reply(r, false, "MQTT topic is already assigned");
+  if (transport == SC_REMOTE_MQTT) {
+    memcpy(remote.json_key, json_key, strlen(json_key) + 1);
+    if (remote.topic[0] && !valid_publish_topic(remote.topic))
+      return automation_reply(r, false, "Invalid MQTT topic");
+    for (uint8_t i = 0; remote.topic[0] && i < SC_MAX_REMOTE_SENSORS; i++)
+      if (i != index && c.remote_transport[i] == SC_REMOTE_MQTT &&
+          !strcmp(remote.topic, c.remote_sensor[i].topic))
+        return automation_reply(r, false, "MQTT topic is already assigned");
+  } else {
+    int port = qint(body, "port", 502);
+    int unit = qint(body, "unit", 1);
+    int function = qint(body, "function", 3);
+    int address = qint(body, "address", 0);
+    int value_type = qint(body, "valueType", SC_MODBUS_U16);
+    int word_order = qint(body, "wordOrder", 0);
+    int poll = qint(body, "poll", 10);
+    if (port < 1 || port > 65535 || unit < 1 || unit > 247 ||
+        function < 1 || function > 4 || address < 0 || address > 65535 ||
+        value_type < 0 || value_type > SC_MODBUS_F32 ||
+        word_order < 0 || word_order > 3 || poll < 5 ||
+        poll > SC_REMOTE_STALE_SEC)
+      return automation_reply(r, false, "Invalid Modbus settings");
+    sc_remote_modbus_config_t m = {
+      .port = port, .unit = unit, .function = function, .address = address,
+      .value_type = value_type, .word_order = word_order, .poll_sec = poll,
+      .scale = qfloat(body, "scale", 1.0f),
+      .offset = qfloat(body, "offset", 0.0f)
+    };
+    if (!valid_modbus_settings(remote.topic, &m))
+      return automation_reply(r, false, "Invalid Modbus host or register type");
+    sc_remote_modbus_encode(&remote, &m);
+  }
   char old_topic[SC_REMOTE_TOPIC_LEN];
-  memcpy(old_topic, c.remote_sensor[index].topic, sizeof(old_topic));
+  snprintf(old_topic, sizeof(old_topic), "%s",
+           c.remote_transport[index] == SC_REMOTE_MQTT
+               ? c.remote_sensor[index].topic : "");
   c.remote_sensor[index] = remote;
+  c.remote_transport[index] = transport;
   if (sc_config_replace(&c) != ESP_OK)
     return automation_reply(r, false, "Could not save remote sensor");
   sc_automation_reset_remote(index);
-  sc_mqtt_update_remote_subscription(old_topic, remote.topic);
+  sc_modbus_remote_changed(index);
+  sc_mqtt_update_remote_subscription(old_topic,
+      transport == SC_REMOTE_MQTT ? remote.topic : "");
+  if (transport == SC_REMOTE_MODBUS_TCP &&
+      sc_modbus_ensure_started() != ESP_OK)
+    return automation_reply(r, false, "Sensor saved; Modbus worker needs restart");
   return automation_reply(r, true, remote.topic[0] ? "Remote sensor saved" : "Remote sensor cleared");
 }
 
@@ -661,6 +779,7 @@ static cJSON *config_json(bool secrets) {
   cJSON *aa = cJSON_AddArrayToObject(j, "automation");
   for (int i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
     const sc_automation_rule_t *rule = &c.automation[i];
+    const sc_modbus_rule_target_t *target = &c.modbus_rule[i];
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "enabled", rule->enabled);
     cJSON_AddNumberToObject(o, "target", rule->target_relay);
@@ -670,6 +789,15 @@ static cJSON *config_json(bool secrets) {
     cJSON_AddNumberToObject(o, "gate", rule->gate_timer);
     cJSON_AddNumberToObject(o, "hold", rule->hold_sec);
     cJSON_AddNumberToObject(o, "cooldown", rule->cooldown_sec);
+    cJSON_AddNumberToObject(o, "output", target->remote);
+    if (target->remote) {
+      struct in_addr address = {.s_addr = target->ipv4};
+      cJSON_AddStringToObject(o, "mbHost", inet_ntoa(address));
+      cJSON_AddNumberToObject(o, "mbPort", target->port);
+      cJSON_AddNumberToObject(o, "mbUnit", target->unit);
+      cJSON_AddNumberToObject(o, "mbAddress", target->address);
+      cJSON_AddBoolToObject(o, "mbClear", target->send_clear);
+    }
     cJSON_AddNumberToObject(o, "c0source", rule->condition[0].source);
     cJSON_AddNumberToObject(o, "c0op", rule->condition[0].op);
     cJSON_AddNumberToObject(o, "c0v1", rule->condition[0].value1);
@@ -683,9 +811,25 @@ static cJSON *config_json(bool secrets) {
   cJSON *rsa = cJSON_AddArrayToObject(j, "remoteSensors");
   for (int i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "topic", c.remote_sensor[i].topic);
-    cJSON_AddStringToObject(o, "jsonKey", c.remote_sensor[i].json_key);
     cJSON_AddStringToObject(o, "label", c.remote_sensor[i].label);
+    cJSON_AddNumberToObject(o, "transport", c.remote_transport[i]);
+    if (c.remote_transport[i] == SC_REMOTE_MODBUS_TCP) {
+      sc_remote_modbus_config_t m;
+      sc_remote_modbus_decode(&c.remote_sensor[i], &m);
+      cJSON_AddStringToObject(o, "host", c.remote_sensor[i].topic);
+      cJSON_AddNumberToObject(o, "port", m.port);
+      cJSON_AddNumberToObject(o, "unit", m.unit);
+      cJSON_AddNumberToObject(o, "function", m.function);
+      cJSON_AddNumberToObject(o, "address", m.address);
+      cJSON_AddNumberToObject(o, "valueType", m.value_type);
+      cJSON_AddNumberToObject(o, "wordOrder", m.word_order);
+      cJSON_AddNumberToObject(o, "poll", m.poll_sec);
+      cJSON_AddNumberToObject(o, "scale", m.scale);
+      cJSON_AddNumberToObject(o, "offset", m.offset);
+    } else {
+      cJSON_AddStringToObject(o, "topic", c.remote_sensor[i].topic);
+      cJSON_AddStringToObject(o, "jsonKey", c.remote_sensor[i].json_key);
+    }
     cJSON_AddItemToArray(rsa, o);
   }
   return j;
@@ -855,6 +999,8 @@ static esp_err_t restore_config_object(cJSON *j) {
       cJSON *o = cJSON_GetArrayItem(aa, i);
       if (!cJSON_IsObject(o)) continue;
       sc_automation_rule_t rule = {0};
+      sc_modbus_rule_target_t target = {.port = 502, .unit = 1,
+                                        .send_clear = 1};
 #define RESTORE_RULE_INT(name, field) do { x=cJSON_GetObjectItem(o,name); if(cJSON_IsNumber(x)) rule.field=x->valueint; } while(0)
 #define RESTORE_RULE_FLOAT(name, field) do { x=cJSON_GetObjectItem(o,name); if(cJSON_IsNumber(x)) rule.field=(float)x->valuedouble; } while(0)
       x = cJSON_GetObjectItem(o, "enabled");
@@ -876,7 +1022,31 @@ static esp_err_t restore_config_object(cJSON *j) {
       RESTORE_RULE_FLOAT("c1v2", condition[1].value2);
 #undef RESTORE_RULE_INT
 #undef RESTORE_RULE_FLOAT
-      if (rule.target_relay >= c.relay_count ||
+      x = cJSON_GetObjectItem(o, "output");
+      target.remote = cJSON_IsNumber(x) && x->valueint == 1;
+      if (target.remote) {
+        struct in_addr ip;
+        char host[16] = {0};
+        jcpy(o, "mbHost", host, sizeof(host));
+        x = cJSON_GetObjectItem(o, "mbPort");
+        int port = cJSON_IsNumber(x) ? x->valueint : 0;
+        x = cJSON_GetObjectItem(o, "mbUnit");
+        int unit = cJSON_IsNumber(x) ? x->valueint : 0;
+        x = cJSON_GetObjectItem(o, "mbAddress");
+        int address = cJSON_IsNumber(x) ? x->valueint : -1;
+        x = cJSON_GetObjectItem(o, "mbClear");
+        target.send_clear = jtruth(x);
+        if (!valid_modbus_host(host) || !inet_aton(host, &ip) ||
+            port < 1 || port > 65535 || unit < 1 || unit > 247 ||
+            address < 0 || address > 65535) rule.enabled = 0;
+        else {
+          target.ipv4 = ip.s_addr;
+          target.port = port;
+          target.unit = unit;
+          target.address = address;
+        }
+      }
+      if ((!target.remote && rule.target_relay >= c.relay_count) ||
           rule.action > SC_AUTOMATION_ACTION_TOGGLE ||
           rule.logic > SC_AUTOMATION_LOGIC_OR ||
           rule.trigger_mode > SC_AUTOMATION_PERIODIC ||
@@ -892,10 +1062,11 @@ static esp_err_t restore_config_object(cJSON *j) {
           (rule.condition[1].source != SC_AUTOMATION_SOURCE_NONE &&
            rule.condition[1].op == SC_AUTOMATION_BETWEEN &&
            rule.condition[1].value2 < rule.condition[1].value1) ||
-          (rule.trigger_mode == SC_AUTOMATION_PERIODIC &&
+          ((rule.trigger_mode == SC_AUTOMATION_PERIODIC || target.remote) &&
            rule.action == SC_AUTOMATION_ACTION_TOGGLE))
         rule.enabled = 0;
       c.automation[i] = rule;
+      c.modbus_rule[i] = target;
     }
   }
   cJSON *rsa = cJSON_GetObjectItem(j, "remoteSensors");
@@ -903,25 +1074,69 @@ static esp_err_t restore_config_object(cJSON *j) {
     for (int i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
       cJSON *o = cJSON_GetArrayItem(rsa, i);
       if (!cJSON_IsObject(o)) continue;
-      jcpy(o, "topic", c.remote_sensor[i].topic,
-           sizeof(c.remote_sensor[i].topic));
-      jcpy(o, "jsonKey", c.remote_sensor[i].json_key,
-           sizeof(c.remote_sensor[i].json_key));
-      jcpy(o, "label", c.remote_sensor[i].label,
-           sizeof(c.remote_sensor[i].label));
-      if (c.remote_sensor[i].topic[0] &&
-          !valid_publish_topic(c.remote_sensor[i].topic))
-        memset(&c.remote_sensor[i], 0, sizeof(c.remote_sensor[i]));
-      for (int previous = 0; c.remote_sensor[i].topic[0] && previous < i;
-           previous++)
-        if (!strcmp(c.remote_sensor[i].topic,
-                    c.remote_sensor[previous].topic))
-          memset(&c.remote_sensor[i], 0, sizeof(c.remote_sensor[i]));
+      sc_remote_sensor_config_t remote = {0};
+      jcpy(o, "label", remote.label, sizeof(remote.label));
+      x = cJSON_GetObjectItem(o, "transport");
+      bool modbus = cJSON_IsNumber(x) && x->valueint == SC_REMOTE_MODBUS_TCP;
+      if (modbus) {
+        sc_remote_modbus_config_t m = {.scale = 1.0f};
+        bool fields_valid = true;
+        jcpy(o, "host", remote.topic, sizeof(remote.topic));
+#define RESTORE_MB_INT(name, field, low, high) do { \
+          x=cJSON_GetObjectItem(o,name); \
+          if(!cJSON_IsNumber(x)||x->valuedouble<(low)|| \
+             x->valuedouble>(high)||floor(x->valuedouble)!=x->valuedouble) \
+            fields_valid=false; \
+          else m.field=x->valueint; \
+        } while(0)
+        RESTORE_MB_INT("port", port, 1, 65535);
+        RESTORE_MB_INT("unit", unit, 1, 247);
+        RESTORE_MB_INT("function", function, 1, 4);
+        RESTORE_MB_INT("address", address, 0, 65535);
+        RESTORE_MB_INT("valueType", value_type, 0, SC_MODBUS_F32);
+        RESTORE_MB_INT("wordOrder", word_order, 0, 3);
+        RESTORE_MB_INT("poll", poll_sec, 5, SC_REMOTE_STALE_SEC);
+#undef RESTORE_MB_INT
+        x = cJSON_GetObjectItem(o, "scale");
+        if (cJSON_IsNumber(x)) m.scale = x->valuedouble;
+        else fields_valid = false;
+        x = cJSON_GetObjectItem(o, "offset");
+        if (cJSON_IsNumber(x)) m.offset = x->valuedouble;
+        else fields_valid = false;
+        if (fields_valid && valid_modbus_settings(remote.topic, &m)) {
+          sc_remote_modbus_encode(&remote, &m);
+          c.remote_transport[i] = SC_REMOTE_MODBUS_TCP;
+        } else {
+          memset(&remote, 0, sizeof(remote));
+          c.remote_transport[i] = SC_REMOTE_MQTT;
+        }
+      } else {
+        jcpy(o, "topic", remote.topic, sizeof(remote.topic));
+        jcpy(o, "jsonKey", remote.json_key, sizeof(remote.json_key));
+        c.remote_transport[i] = SC_REMOTE_MQTT;
+        if (remote.topic[0] && !valid_publish_topic(remote.topic))
+          memset(&remote, 0, sizeof(remote));
+        for (int previous = 0; remote.topic[0] && previous < i; previous++)
+          if (c.remote_transport[previous] == SC_REMOTE_MQTT &&
+              !strcmp(remote.topic, c.remote_sensor[previous].topic))
+            memset(&remote, 0, sizeof(remote));
+      }
+      c.remote_sensor[i] = remote;
     }
   }
   if (!c.web_user[0] || strchr(c.web_user, ':') || !c.web_password[0])
     return ESP_ERR_INVALID_ARG;
-  return sc_config_replace(&c);
+  esp_err_t saved = sc_config_replace(&c);
+  if (saved == ESP_OK) {
+    for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
+      sc_automation_reset_remote(i);
+      sc_modbus_remote_changed(i);
+      if (c.remote_transport[i] == SC_REMOTE_MQTT)
+        sc_mqtt_update_remote_subscription(NULL, c.remote_sensor[i].topic);
+    }
+    sc_modbus_ensure_started();
+  }
+  return saved;
 }
 
 static int b64_value(uint8_t c){if(c>='A'&&c<='Z')return c-'A';if(c>='a'&&c<='z')return c-'a'+26;if(c>='0'&&c<='9')return c-'0'+52;if(c=='+')return 62;if(c=='/')return 63;if(c=='=')return -2;return -1;}
@@ -943,7 +1158,7 @@ static void restore_meta_done(restore_state_t*s){s->meta[s->meta_len]=0;if(!strc
 static void restore_b64_char(restore_state_t*s,uint8_t c){if(s->file_skip||s->failed)return;s->group[s->group_len++]=c;if(s->group_len==4){uint8_t raw[3];int n=b64_decode4(s->group,raw);s->group_len=0;if(n<0)s->failed=true;else restore_emit(s,raw,(size_t)n);}}
 static void restore_byte(restore_state_t*s,char c){switch(s->phase){case REST_KEY_START:if(c=='\"'){s->key_len=0;s->phase=REST_KEY;}else if(c=='}')s->phase=REST_DONE;break;case REST_KEY:if(c=='\"'){s->key[s->key_len]=0;s->phase=REST_COLON;}else if(s->key_len+1<sizeof(s->key))s->key[s->key_len++]=c;else s->failed=true;break;case REST_COLON:if(c==':')s->phase=REST_VALUE_START;break;case REST_VALUE_START:if(isspace((unsigned char)c))break;s->meta_len=0;if(c=='\"'){if(s->key[0]=='_')s->phase=REST_META_STRING;else{restore_begin_file(s);s->phase=REST_FILE_STRING;}}else{s->meta[s->meta_len++]=c;s->phase=REST_META_BARE;}break;case REST_META_STRING:if(c=='\"'){restore_meta_done(s);s->phase=REST_COMMA;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_META_BARE:if(c==','||c=='}'){while(s->meta_len&&isspace((unsigned char)s->meta[s->meta_len-1]))s->meta_len--;restore_meta_done(s);s->phase=c=='}'?REST_DONE:REST_KEY_START;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_FILE_STRING:if(c=='\"'){restore_finish_file(s);s->phase=REST_COMMA;}else restore_b64_char(s,(uint8_t)c);break;case REST_COMMA:if(c==',')s->phase=REST_KEY_START;else if(c=='}')s->phase=REST_DONE;break;case REST_DONE:break;}}
 static esp_err_t backup_restore(httpd_req_t*r){restore_state_t s={.phase=REST_KEY_START};char q[128],v[16];if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK){if(httpd_query_key_value(q,"restoreWeb",v,sizeof(v))==ESP_OK)s.restore_web=atoi(v)!=0;if(httpd_query_key_value(q,"chipIdMode",s.chip_mode,sizeof(s.chip_mode))!=ESP_OK)snprintf(s.chip_mode,sizeof(s.chip_mode),"keep");}char input[512];int left=r->content_len;while(left>0&&!s.failed){int want=left>(int)sizeof(input)?sizeof(input):left;int n=httpd_req_recv(r,input,want);if(n<=0){s.failed=true;break;}for(int i=0;i<n&&!s.failed;i++)restore_byte(&s,input[i]);left-=n;}if(s.file_open){sc_webfs_stream_close();s.file_open=false;}bool ok=!s.failed&&s.saw_version&&s.phase==REST_DONE;if(ok&&s.restore_web)ok=s.includes_web&&s.written>0;if(ok&&!s.restore_web){if(!s.config)ok=false;else{char target[13]={0};if(!strcmp(s.chip_mode,"replace"))controller_id(target);else if(!strcmp(s.chip_mode,"original")&&strlen(s.old_id)==12){memcpy(target,s.old_id,12);target[12]=0;}if(target[0])normalize_controller_ids(s.config,target);cJSON*j=cJSON_Parse(s.config);if(!j)ok=false;else{ok=restore_config_object(j)==ESP_OK;cJSON_Delete(j);}}}free(s.config);char message[128];if(ok&&s.restore_web)snprintf(message,sizeof(message),"%u web file(s) restored",s.written);else if(ok)snprintf(message,sizeof(message),"Configuration restored");else snprintf(message,sizeof(message),"Restore failed or backup is not compatible");cJSON*out=cJSON_CreateObject();cJSON_AddBoolToObject(out,"ok",ok);cJSON_AddStringToObject(out,"message",message);esp_err_t response=js(r,out);if(ok)schedule_reboot();return response;}
-static esp_err_t reset_config(httpd_req_t*r){sc_config_t old,defaults;sc_config_snapshot(&old);sc_config_defaults(&defaults);for(int i=0;i<SC_MAX_TIMERS;i++){defaults.timer[i]=old.timer[i];defaults.timer[i].enabled=0;defaults.timer_schedule[i]=old.timer_schedule[i];}for(int i=0;i<SC_MAX_AUTOMATION_RULES;i++){defaults.automation[i]=old.automation[i];defaults.automation[i].enabled=0;}memcpy(defaults.remote_sensor,old.remote_sensor,sizeof(defaults.remote_sensor));bool ok=sc_config_replace(&defaults)==ESP_OK;cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",ok?"All configuration reset; timers and automation retained but disabled":"Reset failed");esp_err_t e=js(r,j);if(ok)schedule_reboot();return e;}
+static esp_err_t reset_config(httpd_req_t*r){sc_config_t old,defaults;sc_config_snapshot(&old);sc_config_defaults(&defaults);for(int i=0;i<SC_MAX_TIMERS;i++){defaults.timer[i]=old.timer[i];defaults.timer[i].enabled=0;defaults.timer_schedule[i]=old.timer_schedule[i];}for(int i=0;i<SC_MAX_AUTOMATION_RULES;i++){defaults.automation[i]=old.automation[i];defaults.automation[i].enabled=0;defaults.modbus_rule[i]=old.modbus_rule[i];sc_modbus_rule_submit(i,NULL,false);}memcpy(defaults.remote_sensor,old.remote_sensor,sizeof(defaults.remote_sensor));memcpy(defaults.remote_transport,old.remote_transport,sizeof(defaults.remote_transport));bool ok=sc_config_replace(&defaults)==ESP_OK;cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",ok?"All configuration reset; timers and automation retained but disabled":"Reset failed");esp_err_t e=js(r,j);if(ok)schedule_reboot();return e;}
 
 static esp_err_t files_result(httpd_req_t*r,bool ok,const char*message){cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",message);return js(r,j);}
 static esp_err_t files_list(httpd_req_t*r){size_t count=0;if(sc_webfs_count(&count))return send_error(r,HTTPD_500,"filesystem scan failed");httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");if(httpd_resp_send_chunk(r,"{\"files\":[",10)!=ESP_OK)return ESP_FAIL;for(size_t i=0;i<count;i++){sc_lfs_entry_t entry;if(sc_webfs_entry_at(i,&entry))return ESP_FAIL;char name[SC_LFS_NAME_MAX*6+1],row[SC_LFS_NAME_MAX*6+96];json_escape(name,sizeof(name),entry.name);int n=snprintf(row,sizeof(row),"%s{\"name\":\"%s\",\"size\":%u,\"dir\":%s}",i?",":"",name,(unsigned)entry.size,entry.is_dir?"true":"false");if(n<0||n>=(int)sizeof(row)||httpd_resp_send_chunk(r,row,n)!=ESP_OK)return ESP_FAIL;}char tail[96];int n=snprintf(tail,sizeof(tail),"],\"fsTotal\":%u,\"fsUsed\":%u}",(unsigned)sc_webfs_total(),(unsigned)sc_webfs_used());if(n<0||n>=(int)sizeof(tail)||httpd_resp_send_chunk(r,tail,n)!=ESP_OK)return ESP_FAIL;return httpd_resp_send_chunk(r,NULL,0);}

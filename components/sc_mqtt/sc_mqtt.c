@@ -77,7 +77,9 @@ static void subscribe_remote_sensors(void)
     for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
         char topic[SC_REMOTE_TOPIC_LEN];
         const sc_config_t *source = sc_config_acquire();
-        snprintf(topic, sizeof(topic), "%s", source->remote_sensor[i].topic);
+        snprintf(topic, sizeof(topic), "%s",
+                 source->remote_transport[i] == SC_REMOTE_MQTT
+                     ? source->remote_sensor[i].topic : "");
         sc_config_release();
         if (topic[0]) {
             esp_mqtt_client_subscribe(client, topic, 0);

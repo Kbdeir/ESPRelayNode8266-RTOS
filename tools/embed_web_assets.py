@@ -20,11 +20,16 @@ ASSETS = (
     ("sc_ota_html", "FirmwareMaintenance.html"),
 )
 
+COMPACT_ASSETS = {"LiveReadings.html", "Files.html", "Backup.html"}
+
 
 def main() -> None:
     declarations = []
     for symbol, filename in ASSETS:
         content = (PROJECT_DIR / "data" / filename).read_text(encoding="utf-8")
+        # Drop indentation in large embedded pages; source files stay readable.
+        if filename in COMPACT_ASSETS:
+            content = "\n".join(line.lstrip(" \t") for line in content.split("\n"))
         declarations.append(
             f"const char {symbol}[] = {json.dumps(content, ensure_ascii=False)};"
         )

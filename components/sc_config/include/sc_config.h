@@ -11,6 +11,32 @@
 #define SC_REMOTE_LABEL_LEN 32
 
 typedef enum {
+    SC_REMOTE_MQTT = 0,
+    SC_REMOTE_MODBUS_TCP = 1
+} sc_remote_transport_t;
+
+typedef enum {
+    SC_MODBUS_BOOL = 0,
+    SC_MODBUS_U16 = 1,
+    SC_MODBUS_I16 = 2,
+    SC_MODBUS_U32 = 3,
+    SC_MODBUS_I32 = 4,
+    SC_MODBUS_F32 = 5
+} sc_modbus_value_type_t;
+
+typedef struct {
+    uint16_t port;
+    uint16_t address;
+    uint16_t poll_sec;
+    uint8_t unit;
+    uint8_t function;
+    uint8_t value_type;
+    uint8_t word_order;
+    float scale;
+    float offset;
+} sc_remote_modbus_config_t;
+
+typedef enum {
     SC_INPUT_NONE=0,
     SC_INPUT_MQTT_TOGGLE=1,
     SC_INPUT_MQTT_STATE=2,
@@ -101,8 +127,18 @@ typedef struct {
 } sc_automation_rule_t;
 
 typedef struct {
+    uint32_t ipv4;
+    uint16_t port;
+    uint16_t address;
+    uint8_t unit;
+    uint8_t remote;
+    uint8_t send_clear;
+    uint8_t reserved;
+} sc_modbus_rule_target_t;
+
+typedef struct {
     char topic[SC_REMOTE_TOPIC_LEN];
-    char json_key[SC_REMOTE_KEY_LEN];
+    char json_key[SC_REMOTE_KEY_LEN]; /* Binary Modbus metadata in Modbus mode. */
     char label[SC_REMOTE_LABEL_LEN];
 } sc_remote_sensor_config_t;
 
@@ -197,6 +233,10 @@ typedef struct {
     /* Appended in config v7 so the complete v6 blob remains a stable prefix. */
     sc_automation_rule_t automation[SC_MAX_AUTOMATION_RULES];
     sc_remote_sensor_config_t remote_sensor[SC_MAX_REMOTE_SENSORS];
+    /* v8: keep the v7 prefix intact. Modbus metadata fits in json_key[]. */
+    uint8_t remote_transport[SC_MAX_REMOTE_SENSORS];
+    /* v9: outbound single-coil targets; earlier configuration stays a prefix. */
+    sc_modbus_rule_target_t modbus_rule[SC_MAX_AUTOMATION_RULES];
 } sc_config_t;
 
 esp_err_t sc_config_init(void);
@@ -208,3 +248,7 @@ esp_err_t sc_config_replace(const sc_config_t *cfg);
 esp_err_t sc_config_set_relay_timing(uint8_t relay, bool ttl,
                                      uint32_t seconds);
 void sc_config_defaults(sc_config_t *cfg);
+void sc_remote_modbus_decode(const sc_remote_sensor_config_t *sensor,
+                             sc_remote_modbus_config_t *out);
+void sc_remote_modbus_encode(sc_remote_sensor_config_t *sensor,
+                             const sc_remote_modbus_config_t *value);

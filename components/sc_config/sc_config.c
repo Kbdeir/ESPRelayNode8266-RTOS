@@ -8,7 +8,9 @@
 #include "sc_config.h"
 #include "sc_littlefs.h"
 
-#define CFG_VERSION 7
+#define CFG_VERSION 9
+#define CFG_VERSION_V8 8
+#define CFG_VERSION_V7 7
 #define CFG_VERSION_V6 6
 #define CFG_VERSION_V5 5
 #define CFG_VERSION_V4 4
@@ -22,6 +24,9 @@ static bool storage_ready;
 #define CFG_FILE "/.smartcfg"
 #define CFG_TEMP_FILE "/.smartcfg.tmp"
 #define CFG_FILE_MAGIC 0x53434647U
+
+_Static_assert(sizeof(sc_remote_modbus_config_t) <= SC_REMOTE_KEY_LEN,
+               "Modbus settings must fit the remote sensor metadata field");
 
 typedef struct {
     uint32_t magic;
@@ -58,12 +63,16 @@ static esp_err_t load_file(void){
     size_t n=0;
     if(sc_lfs_read_range(CFG_FILE,0,&header,sizeof(header),&n)<0||
        n!=sizeof(header)||header.magic!=CFG_FILE_MAGIC||
-       header.version!=CFG_VERSION||header.size!=sizeof(cfg))return ESP_ERR_NOT_FOUND;
+       !((header.version==CFG_VERSION&&header.size==sizeof(cfg))||
+         (header.version==CFG_VERSION_V8&&
+          header.size==offsetof(sc_config_t,modbus_rule))||
+         (header.version==CFG_VERSION_V7&&
+          header.size==offsetof(sc_config_t,remote_transport))))return ESP_ERR_NOT_FOUND;
     uint8_t chunk[128],extra;
     uint32_t hash=2166136261U;
     size_t offset=0;
-    while(offset<sizeof(cfg)){
-        size_t want=sizeof(cfg)-offset;
+    while(offset<header.size){
+        size_t want=header.size-offset;
         if(want>sizeof(chunk))want=sizeof(chunk);
         if(sc_lfs_read_range(CFG_FILE,sizeof(header)+offset,chunk,want,&n)<0||n!=want)
             return ESP_ERR_INVALID_CRC;
@@ -71,11 +80,35 @@ static esp_err_t load_file(void){
         offset+=n;
     }
     if(hash!=header.hash||
-       sc_lfs_read_range(CFG_FILE,sizeof(header)+sizeof(cfg),&extra,1,&n)<0||n)
+       sc_lfs_read_range(CFG_FILE,sizeof(header)+header.size,&extra,1,&n)<0||n)
         return ESP_ERR_INVALID_CRC;
-    if(sc_lfs_read_range(CFG_FILE,sizeof(header),&cfg,sizeof(cfg),&n)<0||
-       n!=sizeof(cfg)||cfg.version!=CFG_VERSION)return ESP_ERR_INVALID_CRC;
+    memset(cfg.remote_transport,0,sizeof(cfg.remote_transport));
+    memset(cfg.modbus_rule,0,sizeof(cfg.modbus_rule));
+    if(sc_lfs_read_range(CFG_FILE,sizeof(header),&cfg,header.size,&n)<0||
+       n!=header.size||cfg.version!=header.version)return ESP_ERR_INVALID_CRC;
+    if(header.version==CFG_VERSION_V7){
+        cfg.version=CFG_VERSION;
+        ESP_LOGI(TAG,"migrating filesystem configuration v7 to v9");
+        return persist_file(&cfg);
+    }
+    if(header.version==CFG_VERSION_V8){
+        cfg.version=CFG_VERSION;
+        ESP_LOGI(TAG,"migrating filesystem configuration v8 to v9");
+        return persist_file(&cfg);
+    }
     return ESP_OK;
+}
+
+void sc_remote_modbus_decode(const sc_remote_sensor_config_t *sensor,
+                             sc_remote_modbus_config_t *out){
+    memset(out,0,sizeof(*out));
+    memcpy(out,sensor->json_key,sizeof(*out));
+}
+
+void sc_remote_modbus_encode(sc_remote_sensor_config_t *sensor,
+                             const sc_remote_modbus_config_t *value){
+    memset(sensor->json_key,0,sizeof(sensor->json_key));
+    memcpy(sensor->json_key,value,sizeof(*value));
 }
 
 static void cpy(char *dst, size_t n, const char *src){ if(!src)src=""; snprintf(dst,n,"%s",src); }
@@ -127,6 +160,11 @@ void sc_config_defaults(sc_config_t *c){
     c->temp_control.low_c=40.0f;
     c->temp_control.high_c=90.0f;
     c->temp_control.buffer_c=8.0f;
+    for(int i=0;i<SC_MAX_AUTOMATION_RULES;i++){
+        c->modbus_rule[i].port=502;
+        c->modbus_rule[i].unit=1;
+        c->modbus_rule[i].send_clear=1;
+    }
 }
 
 esp_err_t sc_config_init(void){
@@ -134,9 +172,15 @@ esp_err_t sc_config_init(void){
     sc_config_defaults(&cfg); nvs_handle h; esp_err_t e=nvs_open("smartcfg",NVS_READONLY,&h);
     if(e==ESP_OK){
         size_t n=0;e=nvs_get_blob(h,"config",NULL,&n);
-        if(e==ESP_OK&&(n==sizeof(cfg)||n==offsetof(sc_config_t,automation)||n==offsetof(sc_config_t,web_user)||n==offsetof(sc_config_t,modbus_unit_id)||n==offsetof(sc_config_t,input_count)||n==offsetof(sc_config_t,timer_schedule))){size_t got=n;e=nvs_get_blob(h,"config",&cfg,&got);}
+        if(e==ESP_OK&&(n==sizeof(cfg)||n==offsetof(sc_config_t,modbus_rule)||n==offsetof(sc_config_t,remote_transport)||n==offsetof(sc_config_t,automation)||n==offsetof(sc_config_t,web_user)||n==offsetof(sc_config_t,modbus_unit_id)||n==offsetof(sc_config_t,input_count)||n==offsetof(sc_config_t,timer_schedule))){size_t got=n;e=nvs_get_blob(h,"config",&cfg,&got);}
         nvs_close(h);
         if(e==ESP_OK&&n==sizeof(cfg)&&cfg.version==CFG_VERSION){ESP_LOGI(TAG,"loaded configuration");return ESP_OK;}
+        if(e==ESP_OK&&n==offsetof(sc_config_t,modbus_rule)&&cfg.version==CFG_VERSION_V8){
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v8 to v9");return ESP_OK;
+        }
+        if(e==ESP_OK&&n==offsetof(sc_config_t,remote_transport)&&cfg.version==CFG_VERSION_V7){
+            cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v7 to v9");return ESP_OK;
+        }
         if(e==ESP_OK&&n==offsetof(sc_config_t,automation)&&cfg.version==CFG_VERSION_V6){
             cfg.version=CFG_VERSION;ESP_LOGI(TAG,"migrated configuration v6 to v7");return ESP_OK;
         }
