@@ -210,7 +210,7 @@ body{margin:0;min-height:100vh;color:var(--ink);font-family:Arial,Helvetica,sans
   <a class="back-link" href="/">&#8592; Back to Config</a>
 </main>
 <script>
-var _flags={},_wfsPrev=null;
+var _flags={},_wfsPrev=null,_relayPending={};
 
 function txt(id,v){var e=document.getElementById(id);if(e)e.textContent=(v!=null&&v!=='')? String(v):'—';}
 function show(id){var e=document.getElementById(id);if(e)e.classList.remove('hidden');}
@@ -220,6 +220,7 @@ function relayBadges(arr){
   var c=document.getElementById('relay-badges');if(!c)return;
   if(!arr||!arr.length){c.textContent='No relays found.';return;}
   arr.forEach(function(r){
+    if(_relayPending[r.nb])return;
     var on=String(r.state).toUpperCase()==='ON';
     var rowId='relay-row-'+r.nb,row=document.getElementById(rowId);
     var inner='<div class="relay-name"><span class="dot '+(on?'on':'off')+'"></span>Relay '+r.nb+': <span>'+r.state+'</span></div>'+
@@ -230,16 +231,24 @@ function relayBadges(arr){
 }
 
 function ctrlRelay(nb,action,input){
+  if(_relayPending[nb])return;
+  _relayPending[nb]=true;
   var row=document.getElementById('relay-row-'+nb);
   if(input)input.disabled=true;
   var t0=Date.now();
   // Re-enable after response but enforce a minimum 300 ms between toggles so
   // rapid clicking does not open many simultaneous TCP connections (each holds
   // ~8 KB of lwIP buffers for several minutes via HTTP keep-alive).
-  function reenable(){setTimeout(function(){if(input)input.disabled=false;},Math.max(0,300-(Date.now()-t0)));}
-  fetch('/RelayControl.json?relay='+nb+'&action='+action)
-    .then(function(r){return r.json();})
+  var controller=new AbortController();
+  var timeout=setTimeout(function(){controller.abort();},8000);
+  function reenable(){
+    clearTimeout(timeout);
+    setTimeout(function(){delete _relayPending[nb];if(input)input.disabled=false;},Math.max(0,300-(Date.now()-t0)));
+  }
+  fetch('/RelayControl.json?relay='+nb+'&action='+action,{cache:'no-store',credentials:'same-origin',signal:controller.signal})
+    .then(function(r){if(!r.ok)throw new Error('Relay command failed');return r.json();})
     .then(function(d){
+      if(!d.ok)throw new Error('Relay command rejected');
       var on=d.state==='ON';
       if(row){
         row.className='relay-row '+(on?'on':'off');

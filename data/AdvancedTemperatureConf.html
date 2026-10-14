@@ -10,4 +10,43 @@
 <section class="card"><h2>MQTT Topics</h2><div class="grid"><div class="field full"><label for="tankTopic">Tank temperature publish topic</label><input type="text" name="tankTopic" id="tankTopic" maxlength="95" required></div><div class="field full"><label for="panelTopic">Panel temperature publish topic</label><input type="text" name="panelTopic" id="panelTopic" maxlength="95" required></div></div></section>
 <section class="card logic"><h2>Behavior And Wiring</h2><p>Sensor 1 on <strong id="tankPin">GPIO14</strong> measures the tank. Sensor 2 on <strong id="panelPin">GPIO12</strong> measures the panel. Each sensor uses its own data bus and its own 4.7 kOhm pull-up to 3.3 V.</p><p>The relay turns <strong>ON</strong> when the panel is inside the configured range and <code>panel - tank &gt; difference</code>. It turns <strong>OFF</strong> when the panel is outside the range or <code>panel - tank &lt; difference</code>. Equality keeps the current state.</p><p>Enabling this controller also enables DS18B20 sensing and reserves both sensor GPIOs from digital-input use.</p></section>
 <div class="actions"><button class="btn" type="submit">Save Configuration</button><a class="btn secondary" href="/config.html">Cancel</a></div></form></main>
-<script>function val(id,v){var e=document.getElementById(id);if(e)e.value=v}function text(id,v){var e=document.getElementById(id);if(e)e.textContent=v==null?'-':v}fetch('/TemperatureConfig.json',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){document.getElementById('enabled').checked=!!d.enabled;val('relay',d.relay);val('low',d.low);val('high',d.high);val('buffer',d.buffer);val('tankTopic',d.tankTopic);val('panelTopic',d.panelTopic);text('tank',d.tank==null?'-':Number(d.tank).toFixed(2));text('panel',d.panel==null?'-':Number(d.panel).toFixed(2));text('relayState',d.relayState);text('tankPin','GPIO'+d.tankGpio);text('panelPin','GPIO'+d.panelGpio)});</script></body></html>
+<script>
+function val(id,v){var e=document.getElementById(id);if(e)e.value=v}
+function text(id,v){var e=document.getElementById(id);if(e)e.textContent=v==null?'-':v}
+function temperature(v){
+  if(typeof v!=='number' && (typeof v!=='string' || v.trim()===''))return '-';
+  var n=Number(v);
+  return Number.isFinite(n)?n.toFixed(2):'-';
+}
+var configurationLoaded=false;
+var temperaturePending=false;
+async function refreshTemperature(){
+  if(temperaturePending)return;
+  temperaturePending=true;
+  var controller=new AbortController();
+  var timeout=setTimeout(function(){controller.abort()},8000);
+  try{
+    var response=await fetch('/TemperatureConfig.json',{
+      cache:'no-store',credentials:'same-origin',signal:controller.signal
+    });
+    if(!response.ok)throw new Error('Temperature request failed');
+    var d=await response.json();
+    if(!configurationLoaded){
+      document.getElementById('enabled').checked=!!d.enabled;
+      val('relay',d.relay);val('low',d.low);val('high',d.high);val('buffer',d.buffer);
+      val('tankTopic',d.tankTopic);val('panelTopic',d.panelTopic);
+      configurationLoaded=true;
+    }
+    text('tank',temperature(d.tank));text('panel',temperature(d.panel));
+    text('relayState',d.relayState);
+    text('tankPin','GPIO'+d.tankGpio);text('panelPin','GPIO'+d.panelGpio);
+  }catch(error){
+    text('tank','-');text('panel','-');text('relayState','-');
+  }finally{
+    clearTimeout(timeout);
+    temperaturePending=false;
+  }
+}
+refreshTemperature();
+setInterval(refreshTemperature,2500);
+</script></body></html>

@@ -37,6 +37,29 @@ source component into `components/` if it is not already present. MQTT is suppli
 the pinned ESP8266 RTOS SDK.
 Git and Internet access are therefore required only for that first dependency fetch.
 
+## DS18B20 temperature readings
+
+Enable DS18B20 and save the configuration. Sampling starts without a restart,
+using deadline-based polling in the existing schedule task. The default tank GPIO
+is 14 and the panel GPIO is 12; neither can also be an active relay or digital
+input. Use one probe per GPIO, or set both GPIO fields to the same pin for a
+single tank probe. Sensor readings appear in LiveReadings and `SensorStatus.json`
+after the 760 ms conversion wait and the next sampling cycle.
+The temperature configuration page refreshes readings every 2.5 seconds without
+overwriting unsaved form edits. Missing readings remain unavailable; no synthetic
+zero or -127 temperature is substituted. Existing saved digital-input mappings
+on a sensor GPIO are suppressed at runtime and cannot silently disable sensing.
+
+Use three-wire power: VDD to 3.3 V, GND to board ground, and DQ to its configured
+GPIO with an external 4.7 kOhm pull-up to 3.3 V. Parasite-power operation and
+multiple probes sharing one GPIO are not implemented. Scratchpad CRC failures
+or disconnected probes appear as unavailable and do not trigger temperature
+relay control. GPIO numbers are the ESP8266 GPIO numbers, not board pin labels.
+
+Host regression checks: `python tools/test_ds18b20.py` (requires `cc`, or WSL
+with `cc` on Windows). The test mocks the probes/RTOS; final acceptance requires
+real probes on the board. Page polling checks: `node tools/test_temperature_page.js`.
+
 ## Web UI / LittleFS
 
 The PlatformIO filesystem source directory is the top-level `data/` directory.
@@ -61,6 +84,9 @@ board_build.filesystem = littlefs
 The firmware also carries compiled recovery copies of the core web pages.
 At boot, it seeds missing pages and replaces pages that differ from those
 copies. A firmware-only serial flash therefore still provides the web UI.
+If a page exists only as `.html.gz`, startup preserves that compressed
+upload. Static page requests use the uncompressed file when present, or
+serve its `.gz` counterpart with `Content-Encoding: gzip` otherwise.
 Build a 2 MiB LittleFS image with `pio run -e huzzah_rtos -t buildfs`.
 The project supplies the filesystem geometry from `partitions.csv`, since
 the ESP8266 RTOS linker script does not expose PlatformIO's Arduino-style
@@ -85,8 +111,7 @@ The filesystem partition is `webfs` in `partitions.csv` and occupies
 - Modbus/TCP relay coils
 - automation rules with local, MQTT, or Modbus TCP sensor conditions,
   and local relay or outbound Modbus TCP coil actions
-- DS18B20 acquisition task
-- ACS712 acquisition task
+- DS18B20 and ACS712 acquisition without a separate sensor task
 - NTP/time service
 - LittleFS web filesystem
 - configuration persistence in LittleFS with migration from older NVS data
@@ -141,3 +166,54 @@ the board's Wi-Fi network.
 
 The project is compiled with PlatformIO, ESP8266_RTOS_SDK 3.4, and Espressif's
 GCC 8.4.0 toolchain. A clean `pio run` is used as the release validation step.
+
+`CONFIG_NEWLIB_NANO_FORMAT=y` selects newlib-nano. The application explicitly
+links `_printf_float` and `_scanf_float` for cJSON and automation numeric
+serialization. Hot sensor/configuration telemetry instead uses integer-based
+fixed-point formatting to avoid floating formatter allocations. Nano formatting
+does not support 64-bit integer conversions or
+positional arguments. Runtime heap savings must be measured on the board.
+
+## Heap validation
+
+Sensor acquisition shares the existing schedule task and waits for conversions
+by deadline, without allocating a sensor task or snapshot mutex. Temperature JSON
+streams through a 128-byte buffer without a cJSON tree. Static pages use one open
+LittleFS stream and a 256-byte transfer buffer, including gzip uploads.
+
+MQTT keeps three 32-byte telemetry slots and one 672-byte discovery slot instead
+of four large slots. QoS 0 telemetry never waits for a slot or queue space; a
+congested sample is dropped and the next sampling cycle retries. Discovery keeps
+its full payload capacity and retries the current message for up to ten seconds
+when the pool is busy, without replaying previously queued messages. A timeout
+aborts the batch and frees the worker; reconnecting MQTT or explicitly requesting
+discovery starts a new batch. Timing state is already published by MQTT connection
+sync and timing changes, so discovery does not enqueue duplicate timing samples.
+Discovery buffers live only
+on the temporary worker stack, with extra stack headroom for those buffers.
+
+The heap-optimized build uses 18,408 bytes of static RAM versus 21,532 before
+these changes. It also removes the 2,304-byte sensor stack. HTTP now reserves
+9,472 bytes (1,280 more than the original 8,192): the 7,168-byte trial overflowed
+during Config save when LittleFS compacted metadata and wrote flash. Task/mutex overhead and formatter allocations
+are additional savings; the largest free block is not guaranteed to grow by
+the same amount. Compare `/api/heap` after reboot under the same MQTT/Wi-Fi
+workload and number of browser sessions. Its `httpStackFree` is the HTTP task's
+lowest remaining stack space, in bytes, since startup. Exercise saves, reset,
+backup/restore, timers, files and OTA, including repeated saves that force
+LittleFS metadata compaction. Require at least 512 bytes of remaining stack.
+
+Regression checks: `python tools/test_ds18b20.py`,
+`python tools/test_mqtt_pool.py`, `python tools/test_web_gzip.py`,
+`python tools/test_relay_mqtt.py`, `python tools/test_ha_discovery.py`,
+`node tools/test_readings_page.js`, and
+`node tools/test_temperature_page.js`. Relay notifications publish only to the
+state/publication topics, never back to the subscribed command topic. Delayed
+notifications must not become new commands or re-arm a completed TTL/TTA cycle.
+GCC stack-usage reports are emitted as
+`.su` files in `.pio/build/huzzah_rtos/` for call-chain review.
+PlatformIO runs `tools/test_http_stack.py` whenever the firmware ELF is relinked.
+Run `python tools/test_http_stack.py` separately to check all save-handler
+frames against the decoded compaction call chain, with additional filesystem,
+interrupt and HTTP-dispatch allowances. This regression guard is not a bound
+on every filesystem state; on-device stack-watermark testing is still required.

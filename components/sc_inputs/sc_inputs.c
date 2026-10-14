@@ -92,9 +92,14 @@ void sc_inputs_poll(void)
 {
     const TickType_t debounce = pdMS_TO_TICKS(INPUT_DEBOUNCE_MS);
     TickType_t now = xTaskGetTickCount();
+    const sc_config_t *cfg = sc_config_acquire();
+    bool onewire_active = cfg->ds18b20_active;
+    uint8_t first_gpio = cfg->ds18b20_gpio, second_gpio = cfg->ds18b20_second_gpio;
+    sc_config_release();
     for (uint8_t i = 0; i < input_count; i++) {
         input_runtime_t *input = &inputs[i];
-        if (!input->configured) continue;
+        if (!input->configured || conflicts_with_onewire(onewire_active,
+                first_gpio, second_gpio, input->config.gpio)) continue;
         bool level = gpio_get_level((gpio_num_t)input->config.gpio) != 0;
         if (level != input->raw) {
             input->raw = level;
@@ -110,6 +115,8 @@ void sc_inputs_poll(void)
         if (mqtt_connected && !mqtt_was_connected) {
             for (uint8_t i = 0; i < input_count; i++) {
                 input_runtime_t *input = &inputs[i];
+                if (conflicts_with_onewire(onewire_active, first_gpio,
+                                           second_gpio, input->config.gpio)) continue;
                 if (input->configured) {
                     publish_input_state(input, input->stable);
                 }

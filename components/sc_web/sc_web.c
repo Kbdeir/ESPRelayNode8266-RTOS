@@ -29,6 +29,7 @@
 #include "sc_automation.h"
 #include "sc_modbus.h"
 #include "sc_web.h"
+#include "sc_format.h"
 
 #define httpd_resp_sendstr(req, str) httpd_resp_send((req), (str), -1)
 
@@ -105,6 +106,57 @@ static esp_err_t auth_dispatch(httpd_req_t *r) {
   return route && route->handler ? route->handler(r) : ESP_FAIL;
 }
 static esp_err_t json_text(httpd_req_t*r,const char*body){httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");return httpd_resp_sendstr(r,body);}
+typedef struct {
+  httpd_req_t *req;
+  char data[128];
+  size_t used;
+  esp_err_t error;
+} json_output_t;
+
+static void json_flush(json_output_t *out) {
+  if (out->error == ESP_OK && out->used)
+    out->error = httpd_resp_send_chunk(out->req, out->data, out->used);
+  out->used = 0;
+}
+static void json_write(json_output_t *out, const char *data, size_t size) {
+  while (size && out->error == ESP_OK) {
+    size_t room = sizeof(out->data) - out->used;
+    size_t take = size < room ? size : room;
+    memcpy(out->data + out->used, data, take);
+    out->used += take;
+    data += take;
+    size -= take;
+    if (out->used == sizeof(out->data)) json_flush(out);
+  }
+}
+static void json_write_text(json_output_t *out, const char *text) {
+  json_write(out, text, strlen(text));
+}
+static void json_write_string(json_output_t *out, const char *value) {
+  static const char hex[] = "0123456789abcdef";
+  json_write_text(out, "\"");
+  for (; value && *value && out->error == ESP_OK; value++) {
+    unsigned char c = (unsigned char)*value;
+    if (c == '"' || c == '\\') {
+      char escape[2] = {'\\', (char)c};
+      json_write(out, escape, sizeof(escape));
+    } else if (c < 0x20) {
+      char escape[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]};
+      json_write(out, escape, sizeof(escape));
+    } else json_write(out, (const char *)&c, 1);
+  }
+  json_write_text(out, "\"");
+}
+static void json_write_field(json_output_t *out, const char *key, const char *value) {
+  json_write_text(out, ",");
+  json_write_string(out, key);
+  json_write_text(out, ":");
+  json_write_string(out, value);
+}
+static esp_err_t json_finish(json_output_t *out) {
+  json_flush(out);
+  return out->error == ESP_OK ? httpd_resp_send_chunk(out->req, NULL, 0) : out->error;
+}
 static void json_escape(char*out,size_t cap,const char*in){size_t o=0;if(!cap)return;for(;in&&*in&&o+1<cap;in++){unsigned char c=(unsigned char)*in;if(c=='"'||c=='\\'){if(o+2>=cap)break;out[o++]='\\';out[o++]=(char)c;}else if(c<0x20){if(o+6>=cap)break;int n=snprintf(out+o,cap-o,"\\u%04x",c);if(n!=6)break;o+=6;}else out[o++]=(char)c;}out[o]=0;}
 static bool json_appendf(char*out,size_t cap,size_t*off,const char*fmt,...){if(*off>=cap)return false;va_list ap;va_start(ap,fmt);int n=vsnprintf(out+*off,cap-*off,fmt,ap);va_end(ap);if(n<0||(size_t)n>=cap-*off){*off=cap;return false;}*off+=(size_t)n;return true;}
 static bool json_string_field(char*out,size_t cap,size_t*off,const char*key,const char*value){const char*comma=*off&&out[*off-1]!='{'?",":"";if(!json_appendf(out,cap,off,"%s\"%s\":\"",comma,key))return false;for(;value&&*value;value++){unsigned char c=(unsigned char)*value;if(c=='"'||c=='\\'){if(!json_appendf(out,cap,off,"\\%c",c))return false;}else if(c<0x20){if(!json_appendf(out,cap,off,"\\u%04x",c))return false;}else{if(*off+1>=cap){*off=cap;return false;}out[(*off)++]=(char)c;out[*off]=0;}}return json_appendf(out,cap,off,"\"");}
@@ -143,7 +195,21 @@ static esp_err_t recv_body(httpd_req_t*r,char*b,size_t cap){if(r->content_len<=0
 static void controller_id(char out[13]){uint8_t mac[6]={0};if(esp_wifi_get_mac(ESP_IF_WIFI_STA,mac)!=ESP_OK){snprintf(out,13,"ESP8266");return;}snprintf(out,13,"%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);}
 static void uptime_string(char*out,size_t cap){uint32_t sec=(uint32_t)(esp_timer_get_time()/1000000ULL);uint32_t days=sec/86400;sec%=86400;snprintf(out,cap,"%ud %02u:%02u:%02u",(unsigned)days,(unsigned)(sec/3600),(unsigned)((sec%3600)/60),(unsigned)(sec%60));}
 
-static esp_err_t heap(httpd_req_t*r){sc_health_http_request();sc_health_snapshot_t h;sc_health_snapshot(&h);char body[192];snprintf(body,sizeof(body),"{\"heap\":%u,\"heapMin\":%u,\"heapMaxBlk\":%u,\"wifiReconnects\":%u,\"mqttReconnects\":%u}",(unsigned)h.free_heap,(unsigned)h.min_free_heap,(unsigned)h.max_free_block,(unsigned)h.wifi_reconnects,(unsigned)h.mqtt_reconnects);return json_text(r,body);}
+static esp_err_t heap(httpd_req_t *r) {
+  sc_health_http_request();
+  sc_health_snapshot_t h;
+  sc_health_snapshot(&h);
+  char body[256];
+  int n = snprintf(body, sizeof(body),
+    "{\"heap\":%u,\"heapMin\":%u,\"heapMaxBlk\":%u,\"wifiReconnects\":%u,"
+    "\"mqttReconnects\":%u,\"httpStackFree\":%u,\"mqttPubStackFree\":%u}",
+    (unsigned)h.free_heap, (unsigned)h.min_free_heap, (unsigned)h.max_free_block,
+    (unsigned)h.wifi_reconnects, (unsigned)h.mqtt_reconnects,
+    (unsigned)uxTaskGetStackHighWaterMark(NULL),
+    (unsigned)sc_mqtt_publisher_stack_free());
+  if (n < 0 || n >= (int)sizeof(body)) return ESP_FAIL;
+  return json_text(r, body);
+}
 static esp_err_t getcfg(httpd_req_t *r) {
   int relay = 0;
   char query[96], value[8];
@@ -151,7 +217,7 @@ static esp_err_t getcfg(httpd_req_t *r) {
       httpd_query_key_value(query, "relay", value, sizeof(value)) == ESP_OK)
     relay = atoi(value);
 
-  char node_id[13], system_time[40], uptime[32], body[3072];
+  char node_id[13], system_time[40], uptime[32], current[32], body[3072];
   controller_id(node_id);
   sc_time_format(system_time, sizeof(system_time));
   uptime_string(uptime, sizeof(uptime));
@@ -159,6 +225,10 @@ static esp_err_t getcfg(httpd_req_t *r) {
   const sc_config_t *c = sc_config_acquire();
   if (relay < 0 || relay >= c->relay_count)
     relay = 0;
+  if (!sc_format_fixed(current, sizeof(current), c->relay[relay].max_current, 3)) {
+    sc_config_release();
+    return send_error(r, HTTPD_500, "invalid current limit");
+  }
   size_t offset = 0;
   bool ok =
       json_appendf(body, sizeof(body), &offset, "{") &&
@@ -206,13 +276,13 @@ static esp_err_t getcfg(httpd_req_t *r) {
                         c->relay[relay].acs_topic) &&
       json_appendf(body, sizeof(body), &offset,
                    ",\"ttl\":%u,\"tta\":%u,\"ACS_Active\":%u,"
-                   "\"ACS_Sensor_Model\":%u,\"Max_Current\":%.3f,"
+                   "\"ACS_Sensor_Model\":%u,\"Max_Current\":%s,"
                    "\"%s\":\"%s\"}",
                    (unsigned)c->relay[relay].ttl_sec,
                    (unsigned)c->relay[relay].tta_sec,
                    (unsigned)c->relay[relay].acs_enabled,
                    (unsigned)c->relay[relay].acs_model_amps,
-                   (double)c->relay[relay].max_current,
+                   current,
                    relay == 0 ? "RSTATE0" : "RSTATE1",
                    sc_relay_get(relay) ? "ON" : "OFF");
   sc_config_release();
@@ -220,7 +290,7 @@ static esp_err_t getcfg(httpd_req_t *r) {
     return send_error(r, HTTPD_500, "configuration response too large");
   return json_text(r, body);
 }
-static esp_err_t sensors(httpd_req_t*r){sc_sensor_snapshot_t s;sc_sensors_snapshot(&s);sc_health_snapshot_t h;sc_health_snapshot(&h);char temp1[24],temp2[24],acs1[24],relays[128]={0};if(s.temp1_valid)snprintf(temp1,sizeof(temp1),"%.2f",(double)s.temp1_c);else snprintf(temp1,sizeof(temp1),"\"-\"");if(s.temp2_valid)snprintf(temp2,sizeof(temp2),"%.2f",(double)s.temp2_c);else snprintf(temp2,sizeof(temp2),"\"-\"");if(s.acs_valid)snprintf(acs1,sizeof(acs1),"%.3f",(double)s.acs_amps);else snprintf(acs1,sizeof(acs1),"\"-\"");size_t roff=0;for(uint8_t i=0;i<sc_relay_count()&&roff<sizeof(relays);i++)roff+=(size_t)snprintf(relays+roff,sizeof(relays)-roff,"%s{\"nb\":%u,\"state\":\"%s\"}",i?",":"",(unsigned)i,sc_relay_get(i)?"ON":"OFF");char tm[40],up[32],body[768];sc_time_format(tm,sizeof(tm));uptime_string(up,sizeof(up));int n=snprintf(body,sizeof(body),"{\"ATEMP1\":%s,\"ATEMP2\":%s,\"ACS1\":%s,\"ACS2\":\"-\",\"CT_VOLTAGE\":\"NA\",\"CT_CURRENT\":\"NA\",\"CT_POWER\":\"NA\",\"CT_PF\":\"NA\",\"CT_WH\":\"NA\",\"CT_MTD_WH\":\"NA\",\"CT_YTD_WH\":\"NA\",\"relays\":[%s],\"RSTATE0\":\"%s\",\"RSTATE1\":\"%s\",\"time\":\"%s\",\"uptime\":\"%s\",\"heap\":%u,\"heapMin\":%u,\"heapMaxBlk\":%u}",temp1,temp2,acs1,relays,sc_relay_get(0)?"ON":"OFF",sc_relay_get(1)?"ON":"OFF",tm,up,(unsigned)h.free_heap,(unsigned)h.min_free_heap,(unsigned)h.max_free_block);if(n<0||n>=(int)sizeof(body))return send_error(r,HTTPD_500,"sensor response too large");return json_text(r,body);}
+static esp_err_t sensors(httpd_req_t*r){sc_sensor_snapshot_t s;sc_sensors_snapshot(&s);sc_health_snapshot_t h;sc_health_snapshot(&h);char temp1[24],temp2[24],acs1[24],relays[128]={0};if(s.temp1_valid)sc_format_fixed(temp1,sizeof(temp1),s.temp1_c,2);else snprintf(temp1,sizeof(temp1),"\"-\"");if(s.temp2_valid)sc_format_fixed(temp2,sizeof(temp2),s.temp2_c,2);else snprintf(temp2,sizeof(temp2),"\"-\"");if(s.acs_valid)sc_format_fixed(acs1,sizeof(acs1),s.acs_amps,3);else snprintf(acs1,sizeof(acs1),"\"-\"");size_t roff=0;for(uint8_t i=0;i<sc_relay_count()&&roff<sizeof(relays);i++)roff+=(size_t)snprintf(relays+roff,sizeof(relays)-roff,"%s{\"nb\":%u,\"state\":\"%s\"}",i?",":"",(unsigned)i,sc_relay_get(i)?"ON":"OFF");char tm[40],up[32],body[768];sc_time_format(tm,sizeof(tm));uptime_string(up,sizeof(up));int n=snprintf(body,sizeof(body),"{\"ATEMP1\":%s,\"ATEMP2\":%s,\"ACS1\":%s,\"ACS2\":\"-\",\"CT_VOLTAGE\":\"NA\",\"CT_CURRENT\":\"NA\",\"CT_POWER\":\"NA\",\"CT_PF\":\"NA\",\"CT_WH\":\"NA\",\"CT_MTD_WH\":\"NA\",\"CT_YTD_WH\":\"NA\",\"relays\":[%s],\"RSTATE0\":\"%s\",\"RSTATE1\":\"%s\",\"time\":\"%s\",\"uptime\":\"%s\",\"heap\":%u,\"heapMin\":%u,\"heapMaxBlk\":%u}",temp1,temp2,acs1,relays,sc_relay_get(0)?"ON":"OFF",sc_relay_get(1)?"ON":"OFF",tm,up,(unsigned)h.free_heap,(unsigned)h.min_free_heap,(unsigned)h.max_free_block);if(n<0||n>=(int)sizeof(body))return send_error(r,HTTPD_500,"sensor response too large");return json_text(r,body);}
 static esp_err_t feature_flags(httpd_req_t*r){return json_text(r,"{\"waterFlowSensor\":false,\"oled1306\":false,\"emonlib\":false,\"solarHeater\":false,\"ads1x15\":false,\"hst\":false,\"pressureSensor\":false,\"adsDCCurrent\":false}");}
 static esp_err_t wifi_status(httpd_req_t*r){sc_wifi_status_t s;sc_wifi_status(&s);char ssid[199],body[512];json_escape(ssid,sizeof(ssid),s.ssid);int n=snprintf(body,sizeof(body),"{\"connected\":%s,\"ip\":\"%s\",\"gateway\":\"%s\",\"dns1\":\"%s\",\"dns2\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d}",s.connected?"true":"false",s.ip,s.gateway,s.dns1,s.dns2,ssid,(int)s.rssi);if(n<0||n>=(int)sizeof(body))return send_error(r,HTTPD_500,"Wi-Fi response too large");return json_text(r,body);}
 static esp_err_t mqtt_status(httpd_req_t*r){sc_mqtt_status_t s;sc_mqtt_status(&s);char server_name[88],escaped_server[529],escaped_health[577],body[1408];snprintf(server_name,sizeof(server_name),"%s:%u",s.server,(unsigned)s.port);json_escape(escaped_server,sizeof(escaped_server),server_name);json_escape(escaped_health,sizeof(escaped_health),s.health_topic);int n=snprintf(body,sizeof(body),"{\"connected\":%s,\"enabled\":%s,\"status\":\"%s\",\"server\":\"%s\",\"port\":%u,\"route\":\"direct\",\"healthTopic\":\"%s\"}",s.connected?"true":"false",s.enabled?"true":"false",!s.enabled?"Disabled":(s.connected?"Connected":"Disconnected"),escaped_server,(unsigned)s.port,escaped_health);if(n<0||n>=(int)sizeof(body))return send_error(r,HTTPD_500,"MQTT response too large");return json_text(r,body);}
@@ -587,8 +657,12 @@ static esp_err_t apply_inputs(httpd_req_t *r) {
             "DS18B20 GPIOs cannot also be configured as digital inputs");
     }
   }
+  if (!sc_sensors_validate_config(&c))
+    return send_error(r, HTTPD_400, "DS18B20 GPIOs are invalid or already in use");
   if (sc_config_replace(&c) != ESP_OK)
     return send_error(r, HTTPD_500, "save failed");
+  if (sc_sensors_ensure_started() != ESP_OK)
+    return send_error(r, HTTPD_500, "Saved; sensor task could not start, restart device");
   httpd_resp_set_type(r, "text/html");
   return httpd_resp_sendstr(
       r, "<!doctype html><meta name='viewport' "
@@ -598,33 +672,45 @@ static esp_err_t apply_inputs(httpd_req_t *r) {
          "<p><a href='/Input_Relays_Map.html'>Back to inputs</a></p></body>");
 }
 static esp_err_t temperature_config(httpd_req_t *r) {
-  sc_config_t c;
-  sc_config_snapshot(&c);
+  sc_temp_control_config_t control;
+  char tank_topic[SC_TOPIC_LEN], panel_topic[SC_TOPIC_LEN];
+  const sc_config_t *c = sc_config_acquire();
+  control = c->temp_control;
+  bool ds_active = c->ds18b20_active;
+  uint8_t tank_gpio = c->ds18b20_gpio, panel_gpio = c->ds18b20_second_gpio;
+  memcpy(tank_topic, c->temp_topic1, sizeof(tank_topic));
+  memcpy(panel_topic, c->temp_topic2, sizeof(panel_topic));
+  sc_config_release();
   sc_sensor_snapshot_t s;
   sc_sensors_snapshot(&s);
-  cJSON *j = cJSON_CreateObject();
-  cJSON_AddBoolToObject(j, "enabled", c.temp_control.enabled);
-  cJSON_AddNumberToObject(j, "relay", c.temp_control.relay);
-  cJSON_AddNumberToObject(j, "low", c.temp_control.low_c);
-  cJSON_AddNumberToObject(j, "high", c.temp_control.high_c);
-  cJSON_AddNumberToObject(j, "buffer", c.temp_control.buffer_c);
-  cJSON_AddBoolToObject(j, "dsActive", c.ds18b20_active);
-  cJSON_AddNumberToObject(j, "tankGpio", c.ds18b20_gpio);
-  cJSON_AddNumberToObject(j, "panelGpio", c.ds18b20_second_gpio);
-  cJSON_AddStringToObject(j, "tankTopic", c.temp_topic1);
-  cJSON_AddStringToObject(j, "panelTopic", c.temp_topic2);
-  if (s.temp1_valid)
-    cJSON_AddNumberToObject(j, "tank", s.temp1_c);
-  else
-    cJSON_AddNullToObject(j, "tank");
-  if (s.temp2_valid)
-    cJSON_AddNumberToObject(j, "panel", s.temp2_c);
-  else
-    cJSON_AddNullToObject(j, "panel");
-  cJSON_AddNumberToObject(j, "delta", s.temp_delta_c);
-  cJSON_AddStringToObject(j, "relayState",
-                          sc_relay_get(c.temp_control.relay) ? "ON" : "OFF");
-  return js(r, j);
+  char low[32], high[32], buffer[32], tank[32] = "null", panel[32] = "null", delta[32];
+  if (!sc_format_fixed(low, sizeof(low), control.low_c, 4) ||
+      !sc_format_fixed(high, sizeof(high), control.high_c, 4) ||
+      !sc_format_fixed(buffer, sizeof(buffer), control.buffer_c, 4) ||
+      !sc_format_fixed(delta, sizeof(delta), s.temp_delta_c, 4))
+    return send_error(r, HTTPD_500, "invalid temperature configuration");
+  if (s.temp1_valid) sc_format_fixed(tank, sizeof(tank), s.temp1_c, 4);
+  if (s.temp2_valid) sc_format_fixed(panel, sizeof(panel), s.temp2_c, 4);
+  char chunk[224];
+  int n = snprintf(chunk, sizeof(chunk),
+    "{\"enabled\":%s,\"relay\":%u,\"low\":%s,\"high\":%s,\"buffer\":%s,"
+    "\"dsActive\":%s,\"tankGpio\":%u,\"panelGpio\":%u",
+    control.enabled ? "true" : "false", (unsigned)control.relay, low, high, buffer,
+    ds_active ? "true" : "false", (unsigned)tank_gpio, (unsigned)panel_gpio);
+  if (n < 0 || n >= (int)sizeof(chunk)) return ESP_FAIL;
+  httpd_resp_set_type(r, "application/json");
+  httpd_resp_set_hdr(r, "Connection", "close");
+  httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+  json_output_t out = {.req = r};
+  json_write(&out, chunk, (size_t)n);
+  json_write_field(&out, "tankTopic", tank_topic);
+  json_write_field(&out, "panelTopic", panel_topic);
+  n = snprintf(chunk, sizeof(chunk),
+    ",\"tank\":%s,\"panel\":%s,\"delta\":%s,\"relayState\":\"%s\"}",
+    tank, panel, delta, sc_relay_get(control.relay) ? "ON" : "OFF");
+  if (n < 0 || n >= (int)sizeof(chunk)) return ESP_FAIL;
+  json_write(&out, chunk, (size_t)n);
+  return json_finish(&out);
 }
 static esp_err_t apply_temperature(httpd_req_t *r) {
   char body[900];
@@ -663,20 +749,77 @@ static esp_err_t apply_temperature(httpd_req_t *r) {
         c.input[i].relay = -1;
       }
   }
+  if (!sc_sensors_validate_config(&c))
+    return send_error(r, HTTPD_400, "DS18B20 GPIOs are invalid or already in use");
   if (sc_config_replace(&c) != ESP_OK)
     return send_error(r, HTTPD_500, "save failed");
+  if (sc_sensors_ensure_started() != ESP_OK)
+    return send_error(r, HTTPD_500, "Saved; sensor task could not start, restart device");
   httpd_resp_set_type(r, "text/html");
   return httpd_resp_sendstr(
       r, "<!doctype html><meta name='viewport' "
          "content='width=device-width'><title>Temperature saved</title><body "
          "style='font:14px Arial;padding:24px'><h2>Temperature control "
-         "saved</h2><p>Values were saved. Restart manually to apply sensor task or "
-         "GPIO changes.</p><p><a href='/AdvancedTemperatureConf.html'>Back to "
+         "saved</h2><p>Temperature settings are active.</p><p><a href='/AdvancedTemperatureConf.html'>Back to "
          "temperature control</a></p></body>");
 }
 
-static esp_err_t apply(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK){send_error(r,HTTPD_400,"missing query");return ESP_FAIL;}sc_config_t c;sc_config_snapshot(&c);qstr(q,"PhyLoc",c.phy_loc,sizeof(c.phy_loc));char submitted_ssid[SC_SSID_LEN]={0};qstr(q,"ssid",submitted_ssid,sizeof(submitted_ssid));if(submitted_ssid[0])snprintf(c.ssid,sizeof(c.ssid),"%s",submitted_ssid);char pw[SC_PASS_LEN]={0};if(httpd_query_key_value(q,"pass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.wifi_password,sizeof(c.wifi_password),"%s",pw);qstr(q,"timeserver",c.timeserver,sizeof(c.timeserver));qstr(q,"Web_User",c.web_user,sizeof(c.web_user));if(!c.web_user[0]||strchr(c.web_user,':'))return send_error(r,HTTPD_400,"invalid web username");char web_password[SC_PASS_LEN]={0};qstr(q,"Web_Password",web_password,sizeof(web_password));if(web_password[0])snprintf(c.web_password,sizeof(c.web_password),"%s",web_password);c.timezone_hours=qint(q,"ntptz",c.timezone_hours);c.mqtt_active=httpd_query_key_value(q,"MQTT_Active",pw,sizeof(pw))==ESP_OK;c.ha_discovery_active=httpd_query_key_value(q,"HA_Discovery_Active",pw,sizeof(pw))==ESP_OK;qstr(q,"MQTT_BROKER",c.mqtt_broker,sizeof(c.mqtt_broker));c.mqtt_port=qint(q,"MQTT_B_PRT",c.mqtt_port);c.mqtt_keepalive_sec=qint(q,"MQTT_KeepAliveSeconds",c.mqtt_keepalive_sec);qstr(q,"mqttUser",c.mqtt_user,sizeof(c.mqtt_user));memset(pw,0,sizeof(pw));if(httpd_query_key_value(q,"mqttPass",pw,sizeof(pw))==ESP_OK&&pw[0])snprintf(c.mqtt_password,sizeof(c.mqtt_password),"%s",pw);c.modbus_active=httpd_query_key_value(q,"Modbus_Active",pw,sizeof(pw))==ESP_OK;c.modbus_port=qint(q,"Modbus_Port",c.modbus_port);int unit_id=qint(q,"Modbus_Slave_ID",c.modbus_unit_id);if(unit_id<1||unit_id>247)return send_error(r,HTTPD_400,"invalid Modbus slave ID");c.modbus_unit_id=(uint8_t)unit_id;c.ds18b20_active=httpd_query_key_value(q,"DS18B20_Active",pw,sizeof(pw))==ESP_OK;c.ds18b20_gpio=qint(q,"TempSensorPin",c.ds18b20_gpio);c.ds18b20_second_gpio=qint(q,"SecondTempSensorPin",c.ds18b20_second_gpio);if(sc_config_replace(&c)!=ESP_OK){send_error(r,HTTPD_500,"save failed");return ESP_FAIL;}httpd_resp_set_type(r,"text/html");return httpd_resp_sendstr(r,"<h2>Configuration saved</h2><p>Restart manually from the configuration page to apply network and service changes.</p><p><a href='/config.html'>Back to configuration</a></p>");}
-static esp_err_t applyrelay(httpd_req_t*r){char q[1200];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return ESP_FAIL;sc_config_t c;sc_config_snapshot(&c);int n=qint(q,"RELAYNB",0);if(n<0||n>=c.relay_count)return ESP_FAIL;char old_sub[SC_TOPIC_LEN],old_pub[SC_TOPIC_LEN];snprintf(old_sub,sizeof(old_sub),"%s",c.relay[n].sub_topic);snprintf(old_pub,sizeof(old_pub),"%s",c.relay[n].pub_topic);qstr(q,"PUB_TOPIC1",c.relay[n].pub_topic,sizeof(c.relay[n].pub_topic));qstr(q,"STATE_PUB_TOPIC",c.relay[n].state_pub_topic,sizeof(c.relay[n].state_pub_topic));qstr(q,"SUB_TOPIC1",c.relay[n].sub_topic,sizeof(c.relay[n].sub_topic));qstr(q,"LWILL_TOPIC",c.relay[n].lwill_topic,sizeof(c.relay[n].lwill_topic));qstr(q,"ACS_AMPS",c.relay[n].acs_topic,sizeof(c.relay[n].acs_topic));c.relay[n].ttl_sec=qu32(q,"ttl",c.relay[n].ttl_sec);c.relay[n].tta_sec=qu32(q,"tta",c.relay[n].tta_sec);char acb[8];c.relay[n].acs_enabled=httpd_query_key_value(q,"ACS_Active",acb,sizeof(acb))==ESP_OK;c.relay[n].acs_model_amps=qint(q,"ACS_Sensor_Model",c.relay[n].acs_model_amps);c.relay[n].max_current=qfloat(q,"Max_Current",c.relay[n].max_current);if(sc_config_replace(&c)!=ESP_OK)return ESP_FAIL;sc_relay_set_timing((uint8_t)n,true,c.relay[n].ttl_sec);sc_relay_set_timing((uint8_t)n,false,c.relay[n].tta_sec);sc_mqtt_relay_config_saved((uint8_t)n,old_sub,old_pub);httpd_resp_set_type(r,"text/html");return httpd_resp_sendstr(r,"<h2>Relay saved</h2><p>TTL and TTA are active and synchronized to retained MQTT topics. Restart manually to apply GPIO changes.</p><p><a href='/RelayConfig.html'>Back to relays</a></p>");}
+static esp_err_t apply(httpd_req_t *r)
+{
+  char q[CONFIG_HTTPD_MAX_URI_LEN + 1];
+  if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK)
+    return send_error(r, HTTPD_400, "missing query");
+  sc_config_t c;
+  sc_config_snapshot(&c);
+  qstr(q, "PhyLoc", c.phy_loc, sizeof(c.phy_loc));
+  char submitted_ssid[SC_SSID_LEN] = {0};
+  qstr(q, "ssid", submitted_ssid, sizeof(submitted_ssid));
+  if (submitted_ssid[0]) snprintf(c.ssid, sizeof(c.ssid), "%s", submitted_ssid);
+  char pw[SC_PASS_LEN] = {0};
+  if (httpd_query_key_value(q, "pass", pw, sizeof(pw)) == ESP_OK && pw[0])
+    snprintf(c.wifi_password, sizeof(c.wifi_password), "%s", pw);
+  qstr(q, "timeserver", c.timeserver, sizeof(c.timeserver));
+  qstr(q, "Web_User", c.web_user, sizeof(c.web_user));
+  if (!c.web_user[0] || strchr(c.web_user, ':'))
+    return send_error(r, HTTPD_400, "invalid web username");
+  char web_password[SC_PASS_LEN] = {0};
+  qstr(q, "Web_Password", web_password, sizeof(web_password));
+  if (web_password[0]) snprintf(c.web_password, sizeof(c.web_password), "%s", web_password);
+  c.timezone_hours = qint(q, "ntptz", c.timezone_hours);
+  c.mqtt_active = httpd_query_key_value(q, "MQTT_Active", pw, sizeof(pw)) == ESP_OK;
+  c.ha_discovery_active = httpd_query_key_value(q, "HA_Discovery_Active", pw, sizeof(pw)) == ESP_OK;
+  qstr(q, "MQTT_BROKER", c.mqtt_broker, sizeof(c.mqtt_broker));
+  c.mqtt_port = qint(q, "MQTT_B_PRT", c.mqtt_port);
+  c.mqtt_keepalive_sec = qint(q, "MQTT_KeepAliveSeconds", c.mqtt_keepalive_sec);
+  qstr(q, "mqttUser", c.mqtt_user, sizeof(c.mqtt_user));
+  memset(pw, 0, sizeof(pw));
+  if (httpd_query_key_value(q, "mqttPass", pw, sizeof(pw)) == ESP_OK && pw[0])
+    snprintf(c.mqtt_password, sizeof(c.mqtt_password), "%s", pw);
+  c.modbus_active = httpd_query_key_value(q, "Modbus_Active", pw, sizeof(pw)) == ESP_OK;
+  c.modbus_port = qint(q, "Modbus_Port", c.modbus_port);
+  int unit_id = qint(q, "Modbus_Slave_ID", c.modbus_unit_id);
+  if (unit_id < 1 || unit_id > 247)
+    return send_error(r, HTTPD_400, "invalid Modbus slave ID");
+  c.modbus_unit_id = (uint8_t)unit_id;
+  c.ds18b20_active = httpd_query_key_value(q, "DS18B20_Active", pw, sizeof(pw)) == ESP_OK;
+  int first_gpio = qint(q, "TempSensorPin", c.ds18b20_gpio);
+  int second_gpio = qint(q, "SecondTempSensorPin", c.ds18b20_second_gpio);
+  if (first_gpio < 0 || first_gpio > 255 || second_gpio < 0 || second_gpio > 255)
+    return send_error(r, HTTPD_400, "invalid DS18B20 GPIO");
+  c.ds18b20_gpio = (uint8_t)first_gpio;
+  c.ds18b20_second_gpio = (uint8_t)second_gpio;
+  if (!sc_sensors_validate_config(&c))
+    return send_error(r, HTTPD_400, "DS18B20 GPIOs are invalid or already in use");
+  if (sc_config_replace(&c) != ESP_OK)
+    return send_error(r, HTTPD_500, "save failed");
+  if (sc_sensors_ensure_started() != ESP_OK)
+    return send_error(r, HTTPD_500, "Saved; sensor task could not start, restart device");
+  httpd_resp_set_type(r, "text/html");
+  return httpd_resp_sendstr(r, "<h2>Configuration saved</h2><p>DS18B20 settings are active. "
+      "Restart manually from the configuration page to apply network and service changes.</p>"
+      "<p><a href='/config.html'>Back to configuration</a></p>");
+}
+static esp_err_t applyrelay(httpd_req_t*r){char q[CONFIG_HTTPD_MAX_URI_LEN + 1];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return ESP_FAIL;sc_config_t c;sc_config_snapshot(&c);int n=qint(q,"RELAYNB",0);if(n<0||n>=c.relay_count)return ESP_FAIL;char old_sub[SC_TOPIC_LEN],old_pub[SC_TOPIC_LEN];snprintf(old_sub,sizeof(old_sub),"%s",c.relay[n].sub_topic);snprintf(old_pub,sizeof(old_pub),"%s",c.relay[n].pub_topic);qstr(q,"PUB_TOPIC1",c.relay[n].pub_topic,sizeof(c.relay[n].pub_topic));qstr(q,"STATE_PUB_TOPIC",c.relay[n].state_pub_topic,sizeof(c.relay[n].state_pub_topic));qstr(q,"SUB_TOPIC1",c.relay[n].sub_topic,sizeof(c.relay[n].sub_topic));qstr(q,"LWILL_TOPIC",c.relay[n].lwill_topic,sizeof(c.relay[n].lwill_topic));qstr(q,"ACS_AMPS",c.relay[n].acs_topic,sizeof(c.relay[n].acs_topic));c.relay[n].ttl_sec=qu32(q,"ttl",c.relay[n].ttl_sec);c.relay[n].tta_sec=qu32(q,"tta",c.relay[n].tta_sec);char acb[8];c.relay[n].acs_enabled=httpd_query_key_value(q,"ACS_Active",acb,sizeof(acb))==ESP_OK;c.relay[n].acs_model_amps=qint(q,"ACS_Sensor_Model",c.relay[n].acs_model_amps);c.relay[n].max_current=qfloat(q,"Max_Current",c.relay[n].max_current);if(sc_config_replace(&c)!=ESP_OK)return ESP_FAIL;sc_relay_set_timing((uint8_t)n,true,c.relay[n].ttl_sec);sc_relay_set_timing((uint8_t)n,false,c.relay[n].tta_sec);sc_mqtt_relay_config_saved((uint8_t)n,old_sub,old_pub);httpd_resp_set_type(r,"text/html");return httpd_resp_sendstr(r,"<h2>Relay saved</h2><p>TTL and TTA are active and synchronized to retained MQTT topics. Restart manually to apply GPIO changes.</p><p><a href='/RelayConfig.html'>Back to relays</a></p>");}
 
 static int64_t civil_days(int y,unsigned m,unsigned d){y-=m<=2;const int era=(y>=0?y:y-399)/400;const unsigned yoe=(unsigned)(y-era*400);const unsigned doy=(153*(m+(m>2?-3:9))+2)/5+d-1;const unsigned doe=yoe*365+yoe/4-yoe/100+doy;return (int64_t)era*146097+(int64_t)doe-719468;}
 static bool parse_date(const char*s,int*y,int*m,int*d){return s&&sscanf(s,"%d-%d-%d",y,m,d)==3&&*m>=1&&*m<=12&&*d>=1&&*d<=31;}
@@ -692,12 +835,12 @@ typedef struct{httpd_req_t*req;char data[512];size_t used;esp_err_t error;} time
 static void timer_output_flush(timer_output_t*out){if(out->error==ESP_OK&&out->used){out->error=httpd_resp_send_chunk(out->req,out->data,out->used);out->used=0;}}
 static void timer_output_write(timer_output_t*out,const char*s,size_t n){while(n&&out->error==ESP_OK){size_t room=sizeof(out->data)-out->used;size_t take=n<room?n:room;memcpy(out->data+out->used,s,take);out->used+=take;s+=take;n-=take;if(out->used==sizeof(out->data))timer_output_flush(out);}}
 static esp_err_t timer_render(httpd_req_t*r,const timer_replacement_t*values,size_t count){timer_output_t out={.req=r,.error=ESP_OK};const char*p=sc_timer_html;while(*p&&out.error==ESP_OK){bool matched=false;for(size_t i=0;i<count;i++){size_t n=strlen(values[i].token);if(!strncmp(p,values[i].token,n)){timer_output_write(&out,values[i].value,strlen(values[i].value));p+=n;matched=true;break;}}if(!matched){timer_output_write(&out,p,1);p++;}}timer_output_flush(&out);if(out.error==ESP_OK)out.error=httpd_resp_send_chunk(r,NULL,0);return out.error;}
-static esp_err_t timer_page(httpd_req_t*r){char q[96],v[12];int selected=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK&&httpd_query_key_value(q,"GetTimer",v,sizeof(v))==ESP_OK)selected=atoi(v);if(selected<1||selected>SC_MAX_TIMERS)selected=0;sc_config_t cfg;sc_config_snapshot(&cfg);sc_timer_config_t empty={0};sc_timer_schedule_t empty_schedule={.date_from="1970-01-01",.date_to="2100-01-01"};const sc_timer_config_t*t=selected?&cfg.timer[selected-1]:&empty;const sc_timer_schedule_t*s=selected?&cfg.timer_schedule[selected-1]:&empty_schedule;sc_timer_status_t status={0};if(selected)sc_timer_status(selected,&status);char system_time[40],uptime[32],number[8],type[8],from[8],to[8],hours[8],minutes[8],month_day[8],relay_options[384];sc_time_format(system_time,sizeof(system_time));uptime_string(uptime,sizeof(uptime));snprintf(number,sizeof(number),"%d",selected);snprintf(type,sizeof(type),"%u",(unsigned)(t->type?t->type:SC_TIMER_ONCE));snprintf(from,sizeof(from),"%02u:%02u",(unsigned)t->start_hour,(unsigned)t->start_minute);snprintf(to,sizeof(to),"%02u:%02u",(unsigned)s->end_hour,(unsigned)s->end_minute);snprintf(hours,sizeof(hours),"%u",(unsigned)s->duration_hours);snprintf(minutes,sizeof(minutes),"%u",(unsigned)s->duration_minutes);snprintf(month_day,sizeof(month_day),"%u",(unsigned)(t->month_day?t->month_day:1));size_t off=0;off+=(size_t)snprintf(relay_options+off,sizeof(relay_options)-off,"<option value=\"255\"%s>(none &mdash; schedule window only)</option>",t->relay==UINT8_MAX?" selected":"");for(uint8_t i=0;i<cfg.relay_count&&off<sizeof(relay_options);i++)off+=(size_t)snprintf(relay_options+off,sizeof(relay_options)-off,"<option value=\"%u\"%s>Relay %u</option>",(unsigned)i,t->relay==i?" selected":"",(unsigned)i);const char*checked="1\" checked=\"";const char*unchecked="";const char*tstate=selected&&t->relay<cfg.relay_count?(status.paused?"PAUSED":"NOT PAUSED"):"NA";const char*rstate=selected&&t->relay<cfg.relay_count?(sc_relay_get(t->relay)?"ON":"OFF"):"NA";timer_replacement_t values[]={{"%systemtime%",system_time},{"%uptime%",uptime},{"%TNBT%",number},{"%TMTYPEedit%",type},{"%Dfrom%",s->date_from},{"%DTo%",s->date_to},{"%TFrom%",from},{"%TTo%",to},{"%Mark_Hours%",hours},{"%Mark_Minutes%",minutes},{"%MONTHDAY%",month_day},{"%TIMER_RELAY_OPTIONS%",relay_options},{"%CEnabled%",t->enabled?checked:unchecked},{"%CMonday%",(t->weekdays&1)?checked:unchecked},{"%CTuesday%",(t->weekdays&2)?checked:unchecked},{"%CWednesday%",(t->weekdays&4)?checked:unchecked},{"%CThursday%",(t->weekdays&8)?checked:unchecked},{"%CFriday%",(t->weekdays&16)?checked:unchecked},{"%CSaturday%",(t->weekdays&32)?checked:unchecked},{"%CSunday%",(t->weekdays&64)?checked:unchecked},{"%TSTATE%",tstate},{"%RSTATE%",rstate}};httpd_resp_set_type(r,"text/html");httpd_resp_set_hdr(r,"Cache-Control","no-store");httpd_resp_set_hdr(r,"Connection","close");return timer_render(r,values,sizeof(values)/sizeof(values[0]));}
+static esp_err_t timer_page(httpd_req_t*r){char q[96],v[12];int selected=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK&&httpd_query_key_value(q,"GetTimer",v,sizeof(v))==ESP_OK)selected=atoi(v);if(selected<1||selected>SC_MAX_TIMERS)selected=0;sc_timer_config_t timer={0};sc_timer_schedule_t schedule={.date_from="1970-01-01",.date_to="2100-01-01"};const sc_config_t*cfg=sc_config_acquire();uint8_t relay_count=cfg->relay_count;if(selected){timer=cfg->timer[selected-1];schedule=cfg->timer_schedule[selected-1];}sc_config_release();const sc_timer_config_t*t=&timer;const sc_timer_schedule_t*s=&schedule;sc_timer_status_t status={0};if(selected)sc_timer_status(selected,&status);char system_time[40],uptime[32],number[8],type[8],from[8],to[8],hours[8],minutes[8],month_day[8],relay_options[384];sc_time_format(system_time,sizeof(system_time));uptime_string(uptime,sizeof(uptime));snprintf(number,sizeof(number),"%d",selected);snprintf(type,sizeof(type),"%u",(unsigned)(t->type?t->type:SC_TIMER_ONCE));snprintf(from,sizeof(from),"%02u:%02u",(unsigned)t->start_hour,(unsigned)t->start_minute);snprintf(to,sizeof(to),"%02u:%02u",(unsigned)s->end_hour,(unsigned)s->end_minute);snprintf(hours,sizeof(hours),"%u",(unsigned)s->duration_hours);snprintf(minutes,sizeof(minutes),"%u",(unsigned)s->duration_minutes);snprintf(month_day,sizeof(month_day),"%u",(unsigned)(t->month_day?t->month_day:1));size_t off=0;off+=(size_t)snprintf(relay_options+off,sizeof(relay_options)-off,"<option value=\"255\"%s>(none &mdash; schedule window only)</option>",t->relay==UINT8_MAX?" selected":"");for(uint8_t i=0;i<relay_count&&off<sizeof(relay_options);i++)off+=(size_t)snprintf(relay_options+off,sizeof(relay_options)-off,"<option value=\"%u\"%s>Relay %u</option>",(unsigned)i,t->relay==i?" selected":"",(unsigned)i);const char*checked="1\" checked=\"";const char*unchecked="";const char*tstate=selected&&t->relay<relay_count?(status.paused?"PAUSED":"NOT PAUSED"):"NA";const char*rstate=selected&&t->relay<relay_count?(sc_relay_get(t->relay)?"ON":"OFF"):"NA";timer_replacement_t values[]={{"%systemtime%",system_time},{"%uptime%",uptime},{"%TNBT%",number},{"%TMTYPEedit%",type},{"%Dfrom%",s->date_from},{"%DTo%",s->date_to},{"%TFrom%",from},{"%TTo%",to},{"%Mark_Hours%",hours},{"%Mark_Minutes%",minutes},{"%MONTHDAY%",month_day},{"%TIMER_RELAY_OPTIONS%",relay_options},{"%CEnabled%",t->enabled?checked:unchecked},{"%CMonday%",(t->weekdays&1)?checked:unchecked},{"%CTuesday%",(t->weekdays&2)?checked:unchecked},{"%CWednesday%",(t->weekdays&4)?checked:unchecked},{"%CThursday%",(t->weekdays&8)?checked:unchecked},{"%CFriday%",(t->weekdays&16)?checked:unchecked},{"%CSaturday%",(t->weekdays&32)?checked:unchecked},{"%CSunday%",(t->weekdays&64)?checked:unchecked},{"%TSTATE%",tstate},{"%RSTATE%",rstate}};httpd_resp_set_type(r,"text/html");httpd_resp_set_hdr(r,"Cache-Control","no-store");httpd_resp_set_hdr(r,"Connection","close");return timer_render(r,values,sizeof(values)/sizeof(values[0]));}
 
-static esp_err_t timer_status(httpd_req_t*r){static const char*type_name[]={"Unknown","Date Range","Daily","Weekly","Monthly"};sc_config_t cfg;sc_config_snapshot(&cfg);time_t now=sc_time_now_local();struct tm now_tm;gmtime_r(&now,&now_tm);char head[40];int hn=snprintf(head,sizeof(head),"{\"currentTime\":\"%02d:%02d:%02d\",\"timers\":[",now_tm.tm_hour,now_tm.tm_min,now_tm.tm_sec);httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");if(hn<0||hn>=(int)sizeof(head)||httpd_resp_send_chunk(r,head,hn)!=ESP_OK)return ESP_FAIL;for(int i=1;i<=SC_MAX_TIMERS;i++){sc_timer_status_t st;sc_timer_status(i,&st);const sc_timer_config_t*t=&cfg.timer[i-1];const sc_timer_schedule_t*s=&cfg.timer_schedule[i-1];unsigned end_hour=s->end_hour,end_minute=s->end_minute;if(s->duration_hours||s->duration_minutes){uint32_t end=(t->start_hour*60+t->start_minute+s->duration_hours*60+s->duration_minutes)%(24*60);end_hour=end/60;end_minute=end%60;}int32_t seconds_to_on=st.active?-1:timer_next_seconds(t,s,now);const char*relay_state=t->relay<cfg.relay_count?(sc_relay_get(t->relay)?"ON":"OFF"):"NA";const char*name=t->type<=SC_TIMER_MONTHLY?type_name[t->type]:type_name[0];char row[768];int n=snprintf(row,sizeof(row),"%s{\"id\":%d,\"exists\":%s,\"enabled\":%s,\"timerActive\":%s,\"timerPaused\":%s,\"relayState\":\"%s\",\"relay\":%u,\"type\":%u,\"typeName\":\"%s\",\"dateFrom\":\"%s\",\"dateTo\":\"%s\",\"timeFrom\":\"%02u:%02u\",\"timeTo\":\"%02u:%02u\",\"markHours\":%u,\"markMinutes\":%u,\"monthDay\":%u,\"days\":{\"Mo\":%s,\"Tu\":%s,\"We\":%s,\"Th\":%s,\"Fr\":%s,\"Sa\":%s,\"Su\":%s},\"hour\":%u,\"minute\":%u,\"duration\":%u,\"weekdays\":%u,\"monthday\":%u,\"epoch\":%u,\"secondsToOff\":%d,\"secondsToOn\":%d}",i>1?",":"",i,st.exists?"true":"false",t->enabled?"true":"false",st.active?"true":"false",st.paused?"true":"false",relay_state,(unsigned)t->relay,(unsigned)t->type,name,s->date_from,s->date_to,(unsigned)t->start_hour,(unsigned)t->start_minute,end_hour,end_minute,(unsigned)s->duration_hours,(unsigned)s->duration_minutes,(unsigned)t->month_day,(t->weekdays&1)?"true":"false",(t->weekdays&2)?"true":"false",(t->weekdays&4)?"true":"false",(t->weekdays&8)?"true":"false",(t->weekdays&16)?"true":"false",(t->weekdays&32)?"true":"false",(t->weekdays&64)?"true":"false",(unsigned)t->start_hour,(unsigned)t->start_minute,(unsigned)t->duration_sec,(unsigned)t->weekdays,(unsigned)t->month_day,(unsigned)t->once_epoch,(int)st.seconds_to_off,(int)seconds_to_on);if(n<0||n>=(int)sizeof(row)||httpd_resp_send_chunk(r,row,n)!=ESP_OK)return ESP_FAIL;}if(httpd_resp_send_chunk(r,"]}",2)!=ESP_OK)return ESP_FAIL;return httpd_resp_send_chunk(r,NULL,0);}
+static esp_err_t timer_status(httpd_req_t*r){static const char*type_name[]={"Unknown","Date Range","Daily","Weekly","Monthly"};sc_timer_config_t timers[SC_MAX_TIMERS];sc_timer_schedule_t schedules[SC_MAX_TIMERS];const sc_config_t*cfg=sc_config_acquire();memcpy(timers,cfg->timer,sizeof(timers));memcpy(schedules,cfg->timer_schedule,sizeof(schedules));uint8_t relay_count=cfg->relay_count;sc_config_release();time_t now=sc_time_now_local();struct tm now_tm;gmtime_r(&now,&now_tm);char head[40];int hn=snprintf(head,sizeof(head),"{\"currentTime\":\"%02d:%02d:%02d\",\"timers\":[",now_tm.tm_hour,now_tm.tm_min,now_tm.tm_sec);httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");if(hn<0||hn>=(int)sizeof(head)||httpd_resp_send_chunk(r,head,hn)!=ESP_OK)return ESP_FAIL;for(int i=1;i<=SC_MAX_TIMERS;i++){sc_timer_status_t st;sc_timer_status(i,&st);const sc_timer_config_t*t=&timers[i-1];const sc_timer_schedule_t*s=&schedules[i-1];unsigned end_hour=s->end_hour,end_minute=s->end_minute;if(s->duration_hours||s->duration_minutes){uint32_t end=(t->start_hour*60+t->start_minute+s->duration_hours*60+s->duration_minutes)%(24*60);end_hour=end/60;end_minute=end%60;}int32_t seconds_to_on=st.active?-1:timer_next_seconds(t,s,now);const char*relay_state=t->relay<relay_count?(sc_relay_get(t->relay)?"ON":"OFF"):"NA";const char*name=t->type<=SC_TIMER_MONTHLY?type_name[t->type]:type_name[0];char row[768];int n=snprintf(row,sizeof(row),"%s{\"id\":%d,\"exists\":%s,\"enabled\":%s,\"timerActive\":%s,\"timerPaused\":%s,\"relayState\":\"%s\",\"relay\":%u,\"type\":%u,\"typeName\":\"%s\",\"dateFrom\":\"%s\",\"dateTo\":\"%s\",\"timeFrom\":\"%02u:%02u\",\"timeTo\":\"%02u:%02u\",\"markHours\":%u,\"markMinutes\":%u,\"monthDay\":%u,\"days\":{\"Mo\":%s,\"Tu\":%s,\"We\":%s,\"Th\":%s,\"Fr\":%s,\"Sa\":%s,\"Su\":%s},\"hour\":%u,\"minute\":%u,\"duration\":%u,\"weekdays\":%u,\"monthday\":%u,\"epoch\":%u,\"secondsToOff\":%d,\"secondsToOn\":%d}",i>1?",":"",i,st.exists?"true":"false",t->enabled?"true":"false",st.active?"true":"false",st.paused?"true":"false",relay_state,(unsigned)t->relay,(unsigned)t->type,name,s->date_from,s->date_to,(unsigned)t->start_hour,(unsigned)t->start_minute,end_hour,end_minute,(unsigned)s->duration_hours,(unsigned)s->duration_minutes,(unsigned)t->month_day,(t->weekdays&1)?"true":"false",(t->weekdays&2)?"true":"false",(t->weekdays&4)?"true":"false",(t->weekdays&8)?"true":"false",(t->weekdays&16)?"true":"false",(t->weekdays&32)?"true":"false",(t->weekdays&64)?"true":"false",(unsigned)t->start_hour,(unsigned)t->start_minute,(unsigned)t->duration_sec,(unsigned)t->weekdays,(unsigned)t->month_day,(unsigned)t->once_epoch,(int)st.seconds_to_off,(int)seconds_to_on);if(n<0||n>=(int)sizeof(row)||httpd_resp_send_chunk(r,row,n)!=ESP_OK)return ESP_FAIL;}if(httpd_resp_send_chunk(r,"]}",2)!=ESP_OK)return ESP_FAIL;return httpd_resp_send_chunk(r,NULL,0);}
 static esp_err_t timer_control(httpd_req_t*r){char q[96],v[16];int relay=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return send_error(r,HTTPD_400,"missing query");if(httpd_query_key_value(q,"relay",v,sizeof(v))==ESP_OK)relay=atoi(v);if(relay<0||relay>=sc_relay_count())return send_error(r,HTTPD_400,"invalid relay");if(httpd_query_key_value(q,"action",v,sizeof(v))!=ESP_OK)return send_error(r,HTTPD_400,"missing action");bool pause=!strcasecmp(v,"pause");if(!pause&&strcasecmp(v,"resume"))return send_error(r,HTTPD_400,"invalid action");bool paused=sc_timer_set_paused((uint8_t)relay,pause);cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",true);cJSON_AddNumberToObject(j,"relay",relay);cJSON_AddBoolToObject(j,"paused",paused);return js(r,j);}
 static esp_err_t timer_save(httpd_req_t*r){char q[512];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return ESP_FAIL;int id=qint(q,"id",1)-1;if(id<0||id>=SC_MAX_TIMERS)return ESP_FAIL;sc_config_t c;sc_config_snapshot(&c);sc_timer_config_t*t=&c.timer[id];t->enabled=qint(q,"enabled",0);t->type=qint(q,"type",SC_TIMER_DAILY);t->relay=qint(q,"relay",0);t->start_hour=qint(q,"hour",0);t->start_minute=qint(q,"minute",0);t->duration_sec=qint(q,"duration",60);t->weekdays=qint(q,"weekdays",0x7f);t->month_day=qint(q,"monthday",1);t->once_epoch=(uint32_t)qint(q,"epoch",0);sc_timer_schedule_t*s=&c.timer_schedule[id];s->duration_hours=t->duration_sec/3600;s->duration_minutes=(t->duration_sec%3600)/60;uint32_t end=t->start_hour*60+t->start_minute+t->duration_sec/60;s->end_hour=(end/60)%24;s->end_minute=end%60;if(sc_config_replace(&c)!=ESP_OK)return ESP_FAIL;return httpd_resp_sendstr(r,"OK");}
-static esp_err_t timer_save_form(httpd_req_t*r){char q[1024];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return send_error(r,HTTPD_400,"missing timer data");int index=qint(q,"TNumber",qint(q,"TNBT",0))-1;if(index<0||index>=SC_MAX_TIMERS)return send_error(r,HTTPD_400,"invalid timer");sc_config_t cfg;sc_config_snapshot(&cfg);sc_timer_config_t*t=&cfg.timer[index];sc_timer_schedule_t*s=&cfg.timer_schedule[index];t->enabled=query_has(q,"CEnabled");t->type=qint(q,"TMTYPEedit",SC_TIMER_ONCE);if(t->type<SC_TIMER_ONCE||t->type>SC_TIMER_MONTHLY)t->type=SC_TIMER_ONCE;t->relay=qint(q,"TRelay",0);if(t->relay>=cfg.relay_count&&t->relay!=UINT8_MAX)t->relay=0;t->weekdays=(query_has(q,"CMonday")?1:0)|(query_has(q,"CTuesday")?2:0)|(query_has(q,"CWednesday")?4:0)|(query_has(q,"CThursday")?8:0)|(query_has(q,"CFriday")?16:0)|(query_has(q,"CSaturday")?32:0)|(query_has(q,"CSunday")?64:0);t->month_day=qint(q,"MonthDay",1);if(t->month_day<1||t->month_day>31)t->month_day=1;qstr(q,"Dfrom",s->date_from,sizeof(s->date_from));qstr(q,"DTo",s->date_to,sizeof(s->date_to));char value[24]={0};int start_h=0,start_m=0,end_h=0,end_m=0;qstr(q,"TFrom",value,sizeof(value));if(!parse_hhmm(value,&start_h,&start_m))return send_error(r,HTTPD_400,"invalid start time");value[0]=0;qstr(q,"TTo",value,sizeof(value));if(!parse_hhmm(value,&end_h,&end_m))return send_error(r,HTTPD_400,"invalid end time");if(date_number(s->date_from)&&date_number(s->date_to)&&date_number(s->date_to)<date_number(s->date_from))return send_error(r,HTTPD_400,"invalid date range");t->start_hour=start_h;t->start_minute=start_m;s->end_hour=end_h;s->end_minute=end_m;int duration_hours=qint(q,"Mark_Hours",0),duration_minutes=qint(q,"Mark_Minutes",0);if(duration_hours<0)duration_hours=0;if(duration_hours>UINT16_MAX)duration_hours=UINT16_MAX;if(duration_minutes<0)duration_minutes=0;if(duration_minutes>59)duration_minutes=59;s->duration_hours=(uint16_t)duration_hours;s->duration_minutes=(uint8_t)duration_minutes;uint64_t duration=(uint64_t)s->duration_hours*3600+s->duration_minutes*60;if(!duration){if(t->type==SC_TIMER_ONCE){int64_t begin=local_epoch(s->date_from,start_h,start_m),end=local_epoch(s->date_to,end_h,end_m);if(begin<0||end<=begin)return send_error(r,HTTPD_400,"invalid timer span");duration=(uint64_t)(end-begin);}else{int begin=start_h*3600+start_m*60,end=end_h*3600+end_m*60;if(end<=begin)return send_error(r,HTTPD_400,"end time must be after start time");duration=(uint32_t)(end-begin);}}if(duration>UINT32_MAX)duration=UINT32_MAX;t->duration_sec=(uint32_t)duration;int64_t start_epoch=local_epoch(s->date_from,start_h,start_m);t->once_epoch=t->type==SC_TIMER_ONCE&&start_epoch>0?(uint32_t)start_epoch:0;if(sc_config_replace(&cfg)!=ESP_OK)return send_error(r,HTTPD_500,"save failed");httpd_resp_set_type(r,"text/html");httpd_resp_set_hdr(r,"Cache-Control","no-store");httpd_resp_set_hdr(r,"Connection","close");return httpd_resp_sendstr(r,sc_timer_saved_html);}
+static esp_err_t timer_save_form(httpd_req_t*r){char q[CONFIG_HTTPD_MAX_URI_LEN + 1];if(httpd_req_get_url_query_str(r,q,sizeof(q))!=ESP_OK)return send_error(r,HTTPD_400,"missing timer data");int index=qint(q,"TNumber",qint(q,"TNBT",0))-1;if(index<0||index>=SC_MAX_TIMERS)return send_error(r,HTTPD_400,"invalid timer");sc_config_t cfg;sc_config_snapshot(&cfg);sc_timer_config_t*t=&cfg.timer[index];sc_timer_schedule_t*s=&cfg.timer_schedule[index];t->enabled=query_has(q,"CEnabled");t->type=qint(q,"TMTYPEedit",SC_TIMER_ONCE);if(t->type<SC_TIMER_ONCE||t->type>SC_TIMER_MONTHLY)t->type=SC_TIMER_ONCE;t->relay=qint(q,"TRelay",0);if(t->relay>=cfg.relay_count&&t->relay!=UINT8_MAX)t->relay=0;t->weekdays=(query_has(q,"CMonday")?1:0)|(query_has(q,"CTuesday")?2:0)|(query_has(q,"CWednesday")?4:0)|(query_has(q,"CThursday")?8:0)|(query_has(q,"CFriday")?16:0)|(query_has(q,"CSaturday")?32:0)|(query_has(q,"CSunday")?64:0);t->month_day=qint(q,"MonthDay",1);if(t->month_day<1||t->month_day>31)t->month_day=1;qstr(q,"Dfrom",s->date_from,sizeof(s->date_from));qstr(q,"DTo",s->date_to,sizeof(s->date_to));char value[24]={0};int start_h=0,start_m=0,end_h=0,end_m=0;qstr(q,"TFrom",value,sizeof(value));if(!parse_hhmm(value,&start_h,&start_m))return send_error(r,HTTPD_400,"invalid start time");value[0]=0;qstr(q,"TTo",value,sizeof(value));if(!parse_hhmm(value,&end_h,&end_m))return send_error(r,HTTPD_400,"invalid end time");if(date_number(s->date_from)&&date_number(s->date_to)&&date_number(s->date_to)<date_number(s->date_from))return send_error(r,HTTPD_400,"invalid date range");t->start_hour=start_h;t->start_minute=start_m;s->end_hour=end_h;s->end_minute=end_m;int duration_hours=qint(q,"Mark_Hours",0),duration_minutes=qint(q,"Mark_Minutes",0);if(duration_hours<0)duration_hours=0;if(duration_hours>UINT16_MAX)duration_hours=UINT16_MAX;if(duration_minutes<0)duration_minutes=0;if(duration_minutes>59)duration_minutes=59;s->duration_hours=(uint16_t)duration_hours;s->duration_minutes=(uint8_t)duration_minutes;uint64_t duration=(uint64_t)s->duration_hours*3600+s->duration_minutes*60;if(!duration){if(t->type==SC_TIMER_ONCE){int64_t begin=local_epoch(s->date_from,start_h,start_m),end=local_epoch(s->date_to,end_h,end_m);if(begin<0||end<=begin)return send_error(r,HTTPD_400,"invalid timer span");duration=(uint64_t)(end-begin);}else{int begin=start_h*3600+start_m*60,end=end_h*3600+end_m*60;if(end<=begin)return send_error(r,HTTPD_400,"end time must be after start time");duration=(uint32_t)(end-begin);}}if(duration>UINT32_MAX)duration=UINT32_MAX;t->duration_sec=(uint32_t)duration;int64_t start_epoch=local_epoch(s->date_from,start_h,start_m);t->once_epoch=t->type==SC_TIMER_ONCE&&start_epoch>0?(uint32_t)start_epoch:0;if(sc_config_replace(&cfg)!=ESP_OK)return send_error(r,HTTPD_500,"save failed");httpd_resp_set_type(r,"text/html");httpd_resp_set_hdr(r,"Cache-Control","no-store");httpd_resp_set_hdr(r,"Connection","close");return httpd_resp_sendstr(r,sc_timer_saved_html);}
 
 static cJSON *config_json(bool secrets) {
   sc_config_t c;
@@ -1126,6 +1269,7 @@ static esp_err_t restore_config_object(cJSON *j) {
   }
   if (!c.web_user[0] || strchr(c.web_user, ':') || !c.web_password[0])
     return ESP_ERR_INVALID_ARG;
+  if (!sc_sensors_validate_config(&c)) return ESP_ERR_INVALID_ARG;
   esp_err_t saved = sc_config_replace(&c);
   if (saved == ESP_OK) {
     for (uint8_t i = 0; i < SC_MAX_REMOTE_SENSORS; i++) {
@@ -1135,6 +1279,7 @@ static esp_err_t restore_config_object(cJSON *j) {
         sc_mqtt_update_remote_subscription(NULL, c.remote_sensor[i].topic);
     }
     sc_modbus_ensure_started();
+    saved = sc_sensors_ensure_started();
   }
   return saved;
 }
@@ -1158,7 +1303,34 @@ static void restore_meta_done(restore_state_t*s){s->meta[s->meta_len]=0;if(!strc
 static void restore_b64_char(restore_state_t*s,uint8_t c){if(s->file_skip||s->failed)return;s->group[s->group_len++]=c;if(s->group_len==4){uint8_t raw[3];int n=b64_decode4(s->group,raw);s->group_len=0;if(n<0)s->failed=true;else restore_emit(s,raw,(size_t)n);}}
 static void restore_byte(restore_state_t*s,char c){switch(s->phase){case REST_KEY_START:if(c=='\"'){s->key_len=0;s->phase=REST_KEY;}else if(c=='}')s->phase=REST_DONE;break;case REST_KEY:if(c=='\"'){s->key[s->key_len]=0;s->phase=REST_COLON;}else if(s->key_len+1<sizeof(s->key))s->key[s->key_len++]=c;else s->failed=true;break;case REST_COLON:if(c==':')s->phase=REST_VALUE_START;break;case REST_VALUE_START:if(isspace((unsigned char)c))break;s->meta_len=0;if(c=='\"'){if(s->key[0]=='_')s->phase=REST_META_STRING;else{restore_begin_file(s);s->phase=REST_FILE_STRING;}}else{s->meta[s->meta_len++]=c;s->phase=REST_META_BARE;}break;case REST_META_STRING:if(c=='\"'){restore_meta_done(s);s->phase=REST_COMMA;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_META_BARE:if(c==','||c=='}'){while(s->meta_len&&isspace((unsigned char)s->meta[s->meta_len-1]))s->meta_len--;restore_meta_done(s);s->phase=c=='}'?REST_DONE:REST_KEY_START;}else if(s->meta_len+1<sizeof(s->meta))s->meta[s->meta_len++]=c;else s->failed=true;break;case REST_FILE_STRING:if(c=='\"'){restore_finish_file(s);s->phase=REST_COMMA;}else restore_b64_char(s,(uint8_t)c);break;case REST_COMMA:if(c==',')s->phase=REST_KEY_START;else if(c=='}')s->phase=REST_DONE;break;case REST_DONE:break;}}
 static esp_err_t backup_restore(httpd_req_t*r){restore_state_t s={.phase=REST_KEY_START};char q[128],v[16];if(httpd_req_get_url_query_str(r,q,sizeof(q))==ESP_OK){if(httpd_query_key_value(q,"restoreWeb",v,sizeof(v))==ESP_OK)s.restore_web=atoi(v)!=0;if(httpd_query_key_value(q,"chipIdMode",s.chip_mode,sizeof(s.chip_mode))!=ESP_OK)snprintf(s.chip_mode,sizeof(s.chip_mode),"keep");}char input[512];int left=r->content_len;while(left>0&&!s.failed){int want=left>(int)sizeof(input)?sizeof(input):left;int n=httpd_req_recv(r,input,want);if(n<=0){s.failed=true;break;}for(int i=0;i<n&&!s.failed;i++)restore_byte(&s,input[i]);left-=n;}if(s.file_open){sc_webfs_stream_close();s.file_open=false;}bool ok=!s.failed&&s.saw_version&&s.phase==REST_DONE;if(ok&&s.restore_web)ok=s.includes_web&&s.written>0;if(ok&&!s.restore_web){if(!s.config)ok=false;else{char target[13]={0};if(!strcmp(s.chip_mode,"replace"))controller_id(target);else if(!strcmp(s.chip_mode,"original")&&strlen(s.old_id)==12){memcpy(target,s.old_id,12);target[12]=0;}if(target[0])normalize_controller_ids(s.config,target);cJSON*j=cJSON_Parse(s.config);if(!j)ok=false;else{ok=restore_config_object(j)==ESP_OK;cJSON_Delete(j);}}}free(s.config);char message[128];if(ok&&s.restore_web)snprintf(message,sizeof(message),"%u web file(s) restored",s.written);else if(ok)snprintf(message,sizeof(message),"Configuration restored");else snprintf(message,sizeof(message),"Restore failed or backup is not compatible");cJSON*out=cJSON_CreateObject();cJSON_AddBoolToObject(out,"ok",ok);cJSON_AddStringToObject(out,"message",message);esp_err_t response=js(r,out);if(ok)schedule_reboot();return response;}
-static esp_err_t reset_config(httpd_req_t*r){sc_config_t old,defaults;sc_config_snapshot(&old);sc_config_defaults(&defaults);for(int i=0;i<SC_MAX_TIMERS;i++){defaults.timer[i]=old.timer[i];defaults.timer[i].enabled=0;defaults.timer_schedule[i]=old.timer_schedule[i];}for(int i=0;i<SC_MAX_AUTOMATION_RULES;i++){defaults.automation[i]=old.automation[i];defaults.automation[i].enabled=0;defaults.modbus_rule[i]=old.modbus_rule[i];sc_modbus_rule_submit(i,NULL,false);}memcpy(defaults.remote_sensor,old.remote_sensor,sizeof(defaults.remote_sensor));memcpy(defaults.remote_transport,old.remote_transport,sizeof(defaults.remote_transport));bool ok=sc_config_replace(&defaults)==ESP_OK;cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",ok?"All configuration reset; timers and automation retained but disabled":"Reset failed");esp_err_t e=js(r,j);if(ok)schedule_reboot();return e;}
+static esp_err_t reset_config(httpd_req_t *r) {
+  sc_config_t defaults;
+  sc_config_defaults(&defaults);
+  const sc_config_t *old = sc_config_acquire();
+  for (int i = 0; i < SC_MAX_TIMERS; i++) {
+    defaults.timer[i] = old->timer[i];
+    defaults.timer[i].enabled = 0;
+    defaults.timer_schedule[i] = old->timer_schedule[i];
+  }
+  for (int i = 0; i < SC_MAX_AUTOMATION_RULES; i++) {
+    defaults.automation[i] = old->automation[i];
+    defaults.automation[i].enabled = 0;
+    defaults.modbus_rule[i] = old->modbus_rule[i];
+  }
+  memcpy(defaults.remote_sensor, old->remote_sensor, sizeof(defaults.remote_sensor));
+  memcpy(defaults.remote_transport, old->remote_transport, sizeof(defaults.remote_transport));
+  sc_config_release();
+  bool ok = sc_config_replace(&defaults) == ESP_OK;
+  if (ok) for (int i = 0; i < SC_MAX_AUTOMATION_RULES; i++)
+    sc_modbus_rule_submit(i, NULL, false);
+  cJSON *j = cJSON_CreateObject();
+  cJSON_AddBoolToObject(j, "ok", ok);
+  cJSON_AddStringToObject(j, "message", ok
+    ? "All configuration reset; timers and automation retained but disabled" : "Reset failed");
+  esp_err_t e = js(r, j);
+  if (ok) schedule_reboot();
+  return e;
+}
 
 static esp_err_t files_result(httpd_req_t*r,bool ok,const char*message){cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",ok);cJSON_AddStringToObject(j,"message",message);return js(r,j);}
 static esp_err_t files_list(httpd_req_t*r){size_t count=0;if(sc_webfs_count(&count))return send_error(r,HTTPD_500,"filesystem scan failed");httpd_resp_set_type(r,"application/json");httpd_resp_set_hdr(r,"Connection","close");if(httpd_resp_send_chunk(r,"{\"files\":[",10)!=ESP_OK)return ESP_FAIL;for(size_t i=0;i<count;i++){sc_lfs_entry_t entry;if(sc_webfs_entry_at(i,&entry))return ESP_FAIL;char name[SC_LFS_NAME_MAX*6+1],row[SC_LFS_NAME_MAX*6+96];json_escape(name,sizeof(name),entry.name);int n=snprintf(row,sizeof(row),"%s{\"name\":\"%s\",\"size\":%u,\"dir\":%s}",i?",":"",name,(unsigned)entry.size,entry.is_dir?"true":"false");if(n<0||n>=(int)sizeof(row)||httpd_resp_send_chunk(r,row,n)!=ESP_OK)return ESP_FAIL;}char tail[96];int n=snprintf(tail,sizeof(tail),"],\"fsTotal\":%u,\"fsUsed\":%u}",(unsigned)sc_webfs_total(),(unsigned)sc_webfs_used());if(n<0||n>=(int)sizeof(tail)||httpd_resp_send_chunk(r,tail,n)!=ESP_OK)return ESP_FAIL;return httpd_resp_send_chunk(r,NULL,0);}
@@ -1171,10 +1343,66 @@ static esp_err_t core_status(httpd_req_t*r){sc_diag_t d;sc_diag_snapshot(&d);cha
 static esp_err_t core_erase(httpd_req_t*r){esp_err_t e=sc_diag_clear();cJSON*j=cJSON_CreateObject();cJSON_AddBoolToObject(j,"ok",e==ESP_OK);return js(r,j);}
 static esp_err_t ota_upload(httpd_req_t*r){if(sc_ota_begin(r->content_len)!=ESP_OK){send_error(r,HTTPD_500,"ota begin failed");return ESP_FAIL;}char b[1024];int left=r->content_len;while(left>0){int want=left>(int)sizeof(b)?sizeof(b):left;int n=httpd_req_recv(r,b,want);if(n<=0||sc_ota_write(b,n)!=ESP_OK){sc_ota_abort();send_error(r,HTTPD_500,"ota write failed");return ESP_FAIL;}left-=n;}if(sc_ota_finish()!=ESP_OK){send_error(r,HTTPD_500,"ota validation failed");return ESP_FAIL;}httpd_resp_sendstr(r,"OK - rebooting");schedule_reboot();return ESP_OK;}
 
-static esp_err_t static_file(httpd_req_t*r){const char*p=!strcmp(r->uri,"/")?"/index.html":r->uri;if(!strcmp(p,"/Timer1"))p="/Timer1.html";else if(!strcmp(p,"/Input_Relays_Map"))p="/Input_Relays_Map.html";else if(!strcmp(p,"/Automation"))p="/Automation.html";httpd_resp_set_hdr(r,"Connection","close");if(strstr(p,".html"))httpd_resp_set_type(r,"text/html");else if(strstr(p,".css"))httpd_resp_set_type(r,"text/css");else if(strstr(p,".js"))httpd_resp_set_type(r,"application/javascript");char b[768];size_t off=0,n=0;do{if(sc_webfs_read_range(p,off,b,sizeof(b),&n)){if(!off)send_error(r,HTTPD_404,"not found");return ESP_FAIL;}if(n){if(httpd_resp_send_chunk(r,b,n)!=ESP_OK)return ESP_FAIL;off+=n;}}while(n==sizeof(b));return httpd_resp_send_chunk(r,NULL,0);}
+static esp_err_t static_file(httpd_req_t *r)
+{
+  char path[SC_LFS_NAME_MAX];
+  size_t path_len = strcspn(r->uri, "?#");
+  if (!path_len || path_len >= sizeof(path))
+    return send_error(r, HTTPD_404, "not found");
+  memcpy(path, r->uri, path_len);
+  path[path_len] = 0;
+  const char *p = path;
+  if (!strcmp(p, "/")) p = "/index.html";
+  else if (!strcmp(p, "/Timer1")) p = "/Timer1.html";
+  else if (!strcmp(p, "/Input_Relays_Map")) p = "/Input_Relays_Map.html";
+  else if (!strcmp(p, "/Automation")) p = "/Automation.html";
+
+  char b[256], compressed[SC_LFS_NAME_MAX];
+  size_t n = 0;
+  bool gzip = false;
+  if (sc_webfs_read_stream_open(p) < 0) {
+    int len = snprintf(compressed, sizeof(compressed), "%s.gz", p);
+    if (len < 0 || len >= (int)sizeof(compressed) ||
+        sc_webfs_read_stream_open(compressed) < 0)
+      return send_error(r, HTTPD_404, "not found");
+    gzip = true;
+  }
+
+  httpd_resp_set_hdr(r, "Connection", "close");
+  httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+  const char *extension = strrchr(p, '.');
+  if (extension && !strcmp(extension, ".html"))
+    httpd_resp_set_type(r, "text/html");
+  else if (extension && !strcmp(extension, ".css"))
+    httpd_resp_set_type(r, "text/css");
+  else if (extension && !strcmp(extension, ".js"))
+    httpd_resp_set_type(r, "application/javascript");
+  if (gzip) {
+    httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
+  }
+  esp_err_t result = ESP_OK;
+  for (;;) {
+    if (sc_webfs_read_stream_read(b, sizeof(b), &n) < 0) {
+      result = ESP_FAIL;
+      break;
+    }
+    if (!n) break;
+    if (httpd_resp_send_chunk(r, b, n) != ESP_OK) {
+      result = ESP_FAIL;
+      break;
+    }
+  }
+  if (sc_webfs_read_stream_close() < 0) result = ESP_FAIL;
+  return result == ESP_OK ? httpd_resp_send_chunk(r, NULL, 0) : result;
+}
 
 esp_err_t sc_web_init(void){
- httpd_config_t c=HTTPD_DEFAULT_CONFIG();c.max_open_sockets=2;c.max_uri_handlers=48;c.stack_size=8192;c.lru_purge_enable=true;c.recv_wait_timeout=5;c.send_wait_timeout=5;ESP_ERROR_CHECK(httpd_start(&server,&c));
+ // Saves keep a full config snapshot live through LittleFS metadata compaction.
+ // Include flash/interrupt headroom; tools/test_http_stack.py checks build reports.
+ httpd_config_t c=HTTPD_DEFAULT_CONFIG();
+ c.max_open_sockets=2;c.max_uri_handlers=48;c.stack_size=9472;
+ c.lru_purge_enable=true;c.recv_wait_timeout=5;c.send_wait_timeout=5;
+ ESP_ERROR_CHECK(httpd_start(&server,&c));
  static const sc_web_route_t routes[]={
  {"/api/heap",HTTP_GET,heap},{"/api/restart",HTTP_POST,restart_device},{"/GetConfig.json",HTTP_GET,getcfg},{"/FeatureFlags.json",HTTP_GET,feature_flags},{"/SensorStatus.json",HTTP_GET,sensors},{"/WifiStatus.json",HTTP_GET,wifi_status},{"/MqttStatus.json",HTTP_GET,mqtt_status},{"/WireGuardStatus.json",HTTP_GET,wireguard_status},{"/RelayControl.json",HTTP_GET,relayctl},{"/RelayState.json",HTTP_GET,relaystate},{"/InputConfig.json",HTTP_GET,input_config},{"/ApplyInputs.html",HTTP_POST,apply_inputs},{"/TemperatureConfig.json",HTTP_GET,temperature_config},{"/AdvancedTempSave.html",HTTP_POST,apply_temperature},{"/Apply.html",HTTP_GET,apply},{"/ApplyRelay.html",HTTP_GET,applyrelay},{"/TimerStatus.json",HTTP_GET,timer_status},{"/TimerControl.json",HTTP_GET,timer_control},{"/api/timer/save",HTTP_GET,timer_save},{"/savetimer.html",HTTP_GET,timer_save_form},{"/api/automation",HTTP_GET,automation_get},{"/api/automation/rule",HTTP_POST,automation_rule_save},{"/api/automation/remote",HTTP_POST,automation_remote_save},{"/api/backup",HTTP_GET,backup_get},{"/api/restore",HTTP_POST,backup_restore},{"/api/resetconfig",HTTP_POST,reset_config},{"/api/files/list",HTTP_GET,files_list},{"/api/files/content",HTTP_GET,files_content_get},{"/api/files/content",HTTP_POST,files_content_post},{"/api/files/delete",HTTP_POST,files_delete},{"/api/files/rename",HTTP_POST,files_rename},{"/CoreDumpStatus.json",HTTP_GET,core_status},{"/EraseCoreDump.json",HTTP_POST,core_erase},{"/api/ota",HTTP_POST,ota_upload},
  {"/",HTTP_GET,static_file},{"/config.html",HTTP_GET,static_file},{"/LiveReadings.html",HTTP_GET,static_file},{"/RelayConfig.html",HTTP_GET,static_file},{"/Input_Relays_Map",HTTP_GET,static_file},{"/Input_Relays_Map.html",HTTP_GET,static_file},{"/AdvancedTemperatureConf.html",HTTP_GET,static_file},{"/Timer1",HTTP_GET,timer_page},{"/Timer1.html",HTTP_GET,timer_page},{"/Automation",HTTP_GET,static_file},{"/Files.html",HTTP_GET,static_file},{"/Backup.html",HTTP_GET,static_file},{"/coredump.html",HTTP_GET,static_file},{"/FirmwareMaintenance.html",HTTP_GET,static_file}};

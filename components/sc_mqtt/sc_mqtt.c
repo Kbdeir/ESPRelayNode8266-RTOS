@@ -14,6 +14,8 @@
 
 #define PUB_SLOTS 4
 #define PUB_PAYLOAD_LEN 672
+#define PUB_SMALL_PAYLOAD_LEN 32
+#define PUB_TASK_STACK_BYTES 3328
 
 typedef enum {
     MQTT_ITEM_PUBLISH = 0,
@@ -43,12 +45,14 @@ typedef struct {
 
 static esp_mqtt_client_handle_t client;
 static QueueHandle_t pq;
+static TaskHandle_t pub_task;
 static SemaphoreHandle_t pool_lock;
 static mqtt_runtime_config_t cfg;
 static volatile bool connected;
 static char client_id[40];
 static char will_topic[SC_TOPIC_LEN];
-static char payload_pool[PUB_SLOTS][PUB_PAYLOAD_LEN];
+static char large_payload[PUB_PAYLOAD_LEN];
+static char small_payload[PUB_SLOTS - 1][PUB_SMALL_PAYLOAD_LEN];
 static bool payload_used[PUB_SLOTS];
 static volatile bool connection_sync_pending;
 static volatile bool timing_commands_ready;
@@ -121,7 +125,12 @@ static bool queue_timing_update(uint8_t relay, bool ttl, uint32_t seconds)
     return xQueueSend(pq, &item, pdMS_TO_TICKS(50)) == pdTRUE;
 }
 
-static int payload_acquire(const char *payload)
+static char *payload_buffer(uint8_t slot)
+{
+    return slot == PUB_SLOTS - 1 ? large_payload : small_payload[slot];
+}
+
+static int payload_acquire(const char *payload, bool wait_for_slot)
 {
     size_t n = strlen(payload) + 1;
     if (n > PUB_PAYLOAD_LEN) {
@@ -132,17 +141,19 @@ static int payload_acquire(const char *payload)
     TickType_t started = xTaskGetTickCount();
     const TickType_t wait = pdMS_TO_TICKS(250);
     do {
-        if (xSemaphoreTake(pool_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (xSemaphoreTake(pool_lock, wait_for_slot ? pdMS_TO_TICKS(20) : 0) == pdTRUE) {
             for (int i = 0; i < PUB_SLOTS; i++) {
-                if (!payload_used[i]) {
+                size_t cap = i == PUB_SLOTS - 1 ? PUB_PAYLOAD_LEN : PUB_SMALL_PAYLOAD_LEN;
+                if (!payload_used[i] && n <= cap) {
                     payload_used[i] = true;
-                    memcpy(payload_pool[i], payload, n);
+                    memcpy(payload_buffer(i), payload, n);
                     xSemaphoreGive(pool_lock);
                     return i;
                 }
             }
             xSemaphoreGive(pool_lock);
         }
+        if (!wait_for_slot) break;
         vTaskDelay(pdMS_TO_TICKS(5));
     } while ((TickType_t)(xTaskGetTickCount() - started) < wait);
     return -1;
@@ -209,12 +220,10 @@ static bool publish_timing_direct(uint8_t relay, bool publish_commands,
     return ok;
 }
 
-static bool publish_relay_state_direct(uint8_t relay, bool value,
-                                       bool publish_command)
+static bool publish_relay_state_direct(uint8_t relay, bool value)
 {
     char state_topic[SC_TOPIC_LEN];
     char pub_topic[SC_TOPIC_LEN];
-    char command_topic[SC_TOPIC_LEN];
     const sc_config_t *source = sc_config_acquire();
     if (relay >= source->relay_count) {
         sc_config_release();
@@ -224,14 +233,11 @@ static bool publish_relay_state_direct(uint8_t relay, bool value,
              source->relay[relay].state_pub_topic);
     snprintf(pub_topic, sizeof(pub_topic), "%s",
              source->relay[relay].pub_topic);
-    snprintf(command_topic, sizeof(command_topic), "%s",
-             source->relay[relay].sub_topic);
     sc_config_release();
     const char *payload = value ? "on" : "off";
+    /* Commands are inputs only: echoing state there replays stale transitions. */
     bool ok = publish_direct(state_topic, payload, 1);
     ok = publish_direct(pub_topic, payload, 1) && ok;
-    if (publish_command)
-        ok = publish_direct(command_topic, payload, 1) && ok;
     return ok;
 }
 
@@ -246,7 +252,7 @@ static void publish_connected_snapshot(void)
         sc_config_release();
         esp_mqtt_client_subscribe(client, sub_topic, 1);
         /* Leave the retained command untouched until the broker delivers it. */
-        publish_relay_state_direct(i, sc_relay_get(i), false);
+        publish_relay_state_direct(i, sc_relay_get(i));
         publish_timing_direct(i, true, true);
     }
     if (!connected) return;
@@ -354,7 +360,7 @@ static void pubtask(void *arg)
         for (uint8_t relay = 0; connected && relay < cfg.relay_count; relay++)
             if (state_mask & (1U << relay))
                 publish_relay_state_direct(
-                    relay, (state_values & (1U << relay)) != 0, true);
+                    relay, (state_values & (1U << relay)) != 0);
         if (xQueueReceive(pq, &item, pdMS_TO_TICKS(100)) != pdTRUE) continue;
         if (item.kind == MQTT_ITEM_TIMING) {
             bool changed = false;
@@ -385,7 +391,7 @@ static void pubtask(void *arg)
             continue;
         }
         if (connected && client &&
-            esp_mqtt_client_publish(client, item.topic, payload_pool[item.slot], 0, item.qos, item.retain) < 0) {
+            esp_mqtt_client_publish(client, item.topic, payload_buffer(item.slot), 0, item.qos, item.retain) < 0) {
             ESP_LOGW(TAG, "publish failed: %s", item.topic);
         }
         payload_release(item.slot);
@@ -428,7 +434,9 @@ esp_err_t sc_mqtt_init(void)
     pool_lock = xSemaphoreCreateMutex();
     pq = xQueueCreate(PUB_SLOTS, sizeof(pub_t));
     if (!pool_lock || !pq) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(pubtask, "mqpub", 1792, NULL, 4, NULL) != pdPASS) return ESP_ERR_NO_MEM;
+    // Timing commands persist config through LittleFS compaction on this stack.
+    if (xTaskCreate(pubtask, "mqpub", PUB_TASK_STACK_BYTES, NULL, 4, &pub_task) != pdPASS)
+        return ESP_ERR_NO_MEM;
 
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -463,27 +471,38 @@ esp_err_t sc_mqtt_init(void)
     return start_client_if_ready();
 }
 
-static bool queue_publish(const char *topic, const char *payload, bool retain, uint8_t qos)
+static bool queue_publish_once(const char *topic, const char *payload, bool retain,
+                               uint8_t qos, bool wait_for_slot, bool log_busy)
 {
     if (!connected || !client || !pq || !topic || !topic[0] || !payload) return false;
     if (strlen(topic) >= SC_TOPIC_LEN) {
         ESP_LOGW(TAG, "topic too long, publish skipped");
         return false;
     }
-    int slot = payload_acquire(payload);
+    int slot = payload_acquire(payload, wait_for_slot);
     if (slot < 0) {
-        ESP_LOGW(TAG, "publish pool full: %s", topic);
+        if (log_busy) ESP_LOGW(TAG, "publish pool full: %s", topic);
         return false;
     }
     pub_t item = {.slot = (uint8_t)slot, .retain = retain, .qos = qos,
                   .kind = MQTT_ITEM_PUBLISH};
     snprintf(item.topic, sizeof(item.topic), "%s", topic);
-    if (xQueueSend(pq, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (xQueueSend(pq, &item, wait_for_slot ? pdMS_TO_TICKS(100) : 0) != pdTRUE) {
         payload_release(item.slot);
-        ESP_LOGW(TAG, "publish queue full: %s", item.topic);
+        if (log_busy) ESP_LOGW(TAG, "publish queue full: %s", item.topic);
         return false;
     }
     return true;
+}
+
+static bool queue_publish(const char *topic, const char *payload, bool retain, uint8_t qos)
+{
+    return queue_publish_once(topic, payload, retain, qos, qos != 0, true);
+}
+
+bool sc_mqtt_try_publish(const char *topic, const char *payload, bool retain)
+{
+    return queue_publish_once(topic, payload, retain, 1, false, false);
 }
 
 bool sc_mqtt_publish(const char *topic, const char *payload, bool retain)
@@ -504,6 +523,11 @@ void sc_mqtt_status(sc_mqtt_status_t *out)
     out->port = cfg.mqtt_port;
     snprintf(out->server, sizeof(out->server), "%s", cfg.mqtt_broker);
     snprintf(out->health_topic, sizeof(out->health_topic), "%s", will_topic);
+}
+
+uint32_t sc_mqtt_publisher_stack_free(void)
+{
+    return pub_task ? (uint32_t)uxTaskGetStackHighWaterMark(pub_task) : 0;
 }
 
 bool sc_mqtt_connected(void)

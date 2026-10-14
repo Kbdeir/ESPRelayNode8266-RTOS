@@ -9,6 +9,7 @@
 #include "sc_relay.h"
 #include "sc_time.h"
 #include "sc_timer.h"
+#include "sc_sensors.h"
 
 static sc_timer_status_t st[SC_MAX_TIMERS];
 static int64_t off_deadline_us[SC_MAX_TIMERS];
@@ -171,7 +172,12 @@ static void timer_task(void *arg)
         xSemaphoreGive(timer_lock);
         sc_config_release();
         sc_automation_tick();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Advance sensor conversions while preserving the one-second schedule cadence.
+        TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+        do {
+            sc_sensors_poll();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        } while ((int32_t)(until - xTaskGetTickCount()) > 0);
     }
 }
 

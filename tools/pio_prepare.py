@@ -92,6 +92,14 @@ def fetch(dep):
 SDKCONFIG.touch(exist_ok=True)
 configure_webfs_geometry()
 
+def check_http_stack(source, target, env):
+    run([sys.executable, PROJECT_DIR / "tools" / "test_http_stack.py"])
+
+
+env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", check_http_stack)
+env.Depends("$BUILD_DIR/${PROGNAME}.elf",
+            str(PROJECT_DIR / "tools" / "test_http_stack.py"))
+
 if "uploadfs" in COMMAND_LINE_TARGETS:
     platform = env.PioPlatform()
     esptool = Path(platform.get_package_dir("tool-esptoolpy")) / "esptool.py"
